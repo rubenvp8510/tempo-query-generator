@@ -6,6 +6,7 @@ A Go-based tool for generating controlled query load against Tempo's search API.
 
 - [Methodology for Generated Query Load](#methodology-for-generated-query-load)
 - [How to Use the Tool](#how-to-use-the-tool)
+- [Capacity Calculator](#capacity-calculator)
 - [Code Organization](#code-organization)
 
 ## Methodology for Generated Query Load
@@ -175,6 +176,49 @@ The tool includes a Kubernetes deployment manifest in `manifests/deployment.yaml
 kubectl apply -f manifests/deployment.yaml
 ```
 
+### Capacity Calculator
+
+The project includes a capacity calculator tool that validates whether your configuration can sustain the target QPS with the configured concurrency settings. This tool helps you determine if your `totalConcurrency` and `targetQPS` values are feasible under various latency conditions.
+
+#### What It Does
+
+The capacity calculator:
+- Loads your configuration file (same as the main tool)
+- Calculates the maximum allowable latency: `Concurrency / Target QPS`
+- Tests various latency scenarios (10ms, 50ms, 100ms, 200ms, 500ms, 1s, and the exact limit)
+- For each scenario, calculates the maximum possible QPS given the latency
+- Reports whether each scenario can sustain your target QPS
+
+The tool considers the effective latency which includes:
+- Search query latency
+- Trace fetch latency (weighted by `clickProbability`)
+- Processing overhead
+
+#### Running the Capacity Calculator
+
+```bash
+# Using Go run
+CONFIG_FILE=config.yaml go run ./cmd/capacity-calculator
+
+# Or with the default config path
+go run ./cmd/capacity-calculator
+
+# Or build and run
+go build -o capacity-calculator ./cmd/capacity-calculator
+CONFIG_FILE=config.yaml ./capacity-calculator
+```
+
+#### Understanding the Output
+
+The tool logs results using structured logging:
+- **Info level**: Scenarios that pass (sufficient capacity)
+- **Warn level**: Scenarios that are risky (near capacity limit, < 110% of target)
+- **Error level**: Scenarios that fail (bottleneck, cannot sustain target QPS)
+
+If you see errors for latency scenarios that match your expected Tempo response times, you should either:
+1. Increase `totalConcurrency` to add more workers
+2. Decrease `targetQPS` to reduce the load requirement
+
 ### Authentication
 
 The tool supports Kubernetes service account token authentication:
@@ -209,8 +253,10 @@ The codebase is organized into several packages following Go best practices:
 ```
 tempo-query-generator/
 ├── cmd/
-│   └── query-load-generator/
-│       └── main.go              # Application entry point
+│   ├── query-load-generator/
+│   │   └── main.go              # Application entry point
+│   └── capacity-calculator/
+│       └── main.go              # Capacity calculator tool
 ├── internal/
 │   ├── client/
 │   │   ├── tempo.go             # Tempo API client
@@ -240,6 +286,14 @@ The application entry point that:
 - Creates a query lookup map for all query types
 - Creates and starts a single executor managing all workers
 - Starts the metrics HTTP server
+
+#### `cmd/capacity-calculator/main.go`
+
+A utility tool that:
+- Loads and validates configuration (same as main tool)
+- Calculates maximum allowable latency for given concurrency/QPS settings
+- Tests various latency scenarios to determine configuration feasibility
+- Reports results using structured logging (Info/Warn/Error levels)
 
 #### `internal/config/`
 
