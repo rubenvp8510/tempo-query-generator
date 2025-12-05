@@ -6,11 +6,12 @@ tenantId: "tenant-1"
 
 query:
   delay: "5s"
-  concurrentQueries: 5
-  targetQPS: 50  # Total queries per second across all query types
-  burstMultiplier: 2.0  # Rate limiter burst = targetQPS * burstMultiplier (allows catching up)
-  qpsMultiplier: 1.0     # Multiplier to apply to targetQPS for compensation (default: 1.0)
+  totalConcurrency: 50  # Total number of concurrent workers across all queries
+  targetQPS: 50         # Total queries per second across all workers (distributed as targetQPS / totalConcurrency per worker)
+  burstMultiplier: 2.0  # Rate limiter burst multiplier (per-worker burst = perWorkerQPS * burstMultiplier)
+  qpsMultiplier: 1.0    # Multiplier to apply to targetQPS for compensation (default: 1.0)
   limit: 1000           # Maximum number of results to return per query (default: 1000)
+  clickProbability: 0.5 # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
 
 timeBuckets:
   - name: "recent"
@@ -109,9 +110,10 @@ queries:
 # Execution Plan
 # ============================================
 # Define the query execution pattern here.
-# The generator will cycle through these entries in order.
+# Workers cycle through these entries deterministically with staggered starting positions.
+# Query frequency is determined by how often a query appears in this plan.
 # Time ranges are computed dynamically based on buckets.
-# Customize this plan to control query distribution and time bucket usage.
+# Workers start at evenly distributed positions to ensure immediate query diversity.
 
 executionPlan:
   # Resource queries - favor recent and ingester buckets

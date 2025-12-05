@@ -1,6 +1,6 @@
 # Tempo Query Load Generator
 
-A Go-based tool for generating controlled query load against Tempo's search API. This tool is designed to simulate realistic query patterns for performance testing and capacity planning.
+A Go-based tool for generating controlled query load against Tempo's search API. This tool is designed to simulate realistic query patterns for performance testing and capacity planning. It supports both search queries and full trace retrieval, simulating real-world user workflows where users search for traces and then view detailed trace information.
 
 ## Table of Contents
 
@@ -14,9 +14,9 @@ The query load generator uses a sophisticated approach to create realistic and c
 
 ### Rate Limiting and QPS Control
 
-- **Target QPS**: The tool distributes a total target queries per second (QPS) across all configured query types. Each query type receives an equal share of the total QPS.
-- **Rate Limiter**: Uses `golang.org/x/time/rate` to enforce precise rate limiting. The limiter ensures that the actual query rate matches the configured target QPS.
-- **Burst Multiplier**: Allows temporary bursts above the target rate to compensate for network latency and query execution time. The burst size is calculated as `targetQPS * burstMultiplier`.
+- **Target QPS**: The tool achieves a total target queries per second (QPS) by distributing the load across all concurrent workers. Each worker receives an equal share: `perWorkerQPS = targetQPS / totalConcurrency`.
+- **Rate Limiter**: Uses `golang.org/x/time/rate` to enforce precise rate limiting. Each worker has its own independent rate limiter to ensure fair distribution and predictable behavior.
+- **Burst Multiplier**: Allows temporary bursts above the target rate to compensate for network latency and query execution time. The burst size is calculated as `perWorkerQPS * burstMultiplier`.
 - **QPS Multiplier**: Optional multiplier applied to the target QPS for compensation scenarios (default: 1.0).
 
 ### Time Bucket Distribution
@@ -30,15 +30,26 @@ The tool uses a time bucket system to distribute queries across different time r
 
 ### Concurrency Model
 
-- **Concurrent Workers**: Each query type spawns multiple independent worker goroutines (configurable via `concurrentQueries`).
-- **Shared Rate Limiter**: All workers for a query type share a single rate limiter, ensuring the total QPS for that query type matches the target.
+- **Total Concurrency Control**: Configure the exact number of concurrent workers via `totalConcurrency` (e.g., `totalConcurrency: 50` creates exactly 50 concurrent workers).
+- **Per-Worker Rate Limiting**: Each worker has an independent rate limiter set to `targetQPS / totalConcurrency` for fair distribution and predictable behavior.
+- **Staggered Start Positions**: Workers start at evenly distributed positions in the execution plan to ensure immediate query diversity and reduce cache effects.
 - **Initial Delay**: Workers start with a small random delay (0-1 second) to spread the initial load and avoid thundering herd effects.
 
 ### Query Distribution
 
-- **Equal Distribution**: Total target QPS is divided equally among all configured query types.
-- **Per-Query QPS**: Each query type receives `targetQPS / number_of_queries` queries per second.
-- **Execution Plan**: The execution plan defines the sequence and time bucket usage for each query type, allowing fine-grained control over query patterns.
+- **Deterministic Cycling**: Workers cycle through all execution plan entries in order, with each worker maintaining its own position in the cycle.
+- **Staggered Positions**: Workers start at evenly distributed positions: worker N starts at `(N * planLength) / totalWorkers`, ensuring immediate query diversity.
+- **Plan-Based Distribution**: Query frequency is determined by the execution plan - queries with more entries in the plan are executed more frequently.
+- **Reproducible Patterns**: The same configuration produces the same query pattern across test runs, enabling reliable performance comparisons.
+
+### Search-and-Fetch Workflow
+
+The tool simulates realistic user behavior by implementing a search-and-fetch pattern:
+
+- **Search Phase**: Workers execute TraceQL search queries to find traces matching specific criteria.
+- **Fetch Phase**: After a successful search, workers probabilistically fetch the full trace details by trace ID, simulating a user clicking on a search result.
+- **Click Probability**: Configurable probability (0.0-1.0) determines how often full traces are fetched after searches. A value of 0.5 means 50% of successful searches will trigger a trace fetch.
+- **Realistic Load**: This two-phase approach exercises both Tempo's search index and trace retrieval mechanisms, providing a more representative performance test.
 
 ### Metrics Collection
 
@@ -47,6 +58,8 @@ The tool exposes Prometheus metrics on port 2112 (`/metrics` endpoint) for monit
 - Query failure counters
 - Time bucket query counters
 - Spans returned histograms
+- Trace fetch latency histograms
+- Trace fetch failure counters
 
 ## How to Use the Tool
 
@@ -65,11 +78,12 @@ tenantId: "tenant-1"
 
 query:
   delay: "5s"                    # Delay between query cycles (not actively used in current implementation)
-  concurrentQueries: 5            # Number of concurrent workers per query type
-  targetQPS: 50                   # Total queries per second across all query types
-  burstMultiplier: 2.0            # Rate limiter burst multiplier
+  totalConcurrency: 50            # Total number of concurrent workers across all queries
+  targetQPS: 50                   # Total queries per second across all workers
+  burstMultiplier: 2.0            # Rate limiter burst multiplier (per-worker burst = perWorkerQPS * burstMultiplier)
   qpsMultiplier: 1.0             # Optional QPS compensation multiplier
   limit: 1000                     # Maximum results per query
+  clickProbability: 0.5          # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
 
 timeBuckets:
   - name: "recent"
@@ -183,6 +197,8 @@ Key metrics:
 - `query_load_test_time_bucket_queries_total` - Queries per time bucket
 - `query_load_test_time_bucket_duration_seconds` - Duration per time bucket
 - `query_load_test_spans_returned_<namespace>_<query_name>` - Spans returned histogram
+- `query_load_test_trace_fetch_latency_seconds{query_name}` - Trace fetch latency histogram
+- `query_load_test_trace_fetch_failures_total{query_name,status_code}` - Trace fetch failure counter
 
 ## Code Organization
 
@@ -221,7 +237,8 @@ tempo-query-generator/
 The application entry point that:
 - Loads and validates configuration
 - Initializes Prometheus metrics
-- Creates and starts query executors for each query type
+- Creates a query lookup map for all query types
+- Creates and starts a single executor managing all workers
 - Starts the metrics HTTP server
 
 #### `internal/config/`
@@ -245,6 +262,7 @@ The application entry point that:
 **`tempo.go`**: Tempo API client implementation:
 - `TempoClient` - HTTP client for Tempo search API
 - `Search()` - Performs TraceQL queries with optional time ranges
+- `GetTrace()` - Retrieves full trace details by trace ID
 - Handles authentication via Bearer tokens
 - Supports multi-tenancy via `X-Scope-OrgID` header
 
@@ -252,19 +270,23 @@ The application entry point that:
 
 #### `internal/generator/`
 
-**`executor.go`**: Manages query execution for a single query type:
-- `Executor` - Coordinates workers and rate limiting
-- Creates shared rate limiter for all workers of a query type
-- Spawns multiple concurrent workers
+**`executor.go`**: Manages query execution across all query types:
+- `Executor` - Coordinates all workers with total concurrency control
+- Calculates per-worker QPS: `targetQPS / totalConcurrency`
+- Creates independent rate limiter for each worker for fair distribution
+- Spawns workers with staggered starting positions in the execution plan
 - Tracks test start time for time bucket eligibility
 
 **`worker.go`**: Individual query execution worker:
 - `Worker` - Executes queries in a loop
 - Uses builder pattern for flexible construction
-- Cycles through execution plan entries
+- Cycles through all execution plan entries using per-worker counter
+- Starts at staggered position for immediate query diversity
+- Looks up query definitions dynamically from execution plan
 - Selects time buckets based on execution plan
 - Records metrics for each query execution
-- Handles rate limiting via shared limiter
+- Handles rate limiting via independent per-worker limiter
+- Implements search-and-fetch workflow: after successful searches, probabilistically fetches full trace details
 
 **`bucket.go`**: Time bucket selection logic:
 - `SelectTimeBucket()` - Weighted random selection from eligible buckets
@@ -281,24 +303,33 @@ The application entry point that:
    - Load configuration from YAML file
    - Validate configuration
    - Initialize Prometheus metrics
-   - Calculate per-query QPS distribution
+   - Calculate per-worker QPS: `targetQPS / totalConcurrency`
+   - Create query lookup map from all query definitions
 
 2. **Executor Creation** (`executor.go`):
-   - For each query type, create an `Executor`
-   - Create shared rate limiter with target QPS
+   - Create single `Executor` managing all queries
+   - Calculate per-worker QPS distribution
    - Create Tempo client with authentication
 
 3. **Worker Spawning** (`executor.go`):
-   - Spawn `concurrentQueries` workers per query type
-   - Each worker starts with random initial delay
+   - Spawn `totalConcurrency` workers total
+   - Each worker gets independent rate limiter at per-worker QPS
+   - Calculate staggered starting position: `(workerID * planLength) / totalWorkers`
+   - Each worker starts with random initial delay (0-1 second)
    - Workers run concurrently in separate goroutines
 
 4. **Query Execution Loop** (`worker.go`):
-   - Worker waits for rate limiter permission
-   - Selects next execution plan entry (cycles through entries)
+   - Worker waits for its independent rate limiter permission
+   - Increments per-worker counter to get next plan entry index
+   - Cycles through all execution plan entries
+   - Looks up query definition by name from plan entry
    - Determines time bucket and calculates time range
-   - Executes query via Tempo client
+   - Executes search query via Tempo client
    - Records metrics (latency, spans, failures)
+   - **Search-and-Fetch**: If search succeeds and `clickProbability` threshold is met:
+     - Extracts trace ID from first search result
+     - Fetches full trace details via `GetTrace()` API
+     - Records trace fetch metrics (latency, failures)
    - Repeats loop
 
 5. **Metrics Collection**:

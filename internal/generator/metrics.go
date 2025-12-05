@@ -24,6 +24,12 @@ type Metrics struct {
 
 	// Spans returned histogram with query name label
 	SpansReturnedHist *prometheus.HistogramVec
+
+	// Trace fetch latency histogram
+	TraceFetchLatencyHist *prometheus.HistogramVec
+
+	// Trace fetch failures counter
+	TraceFetchFailuresCounter *prometheus.CounterVec
 }
 
 // NewMetrics initializes all Prometheus metrics once at startup
@@ -70,14 +76,32 @@ func NewMetrics(namespace string) *Metrics {
 		Buckets:   []float64{0, 10, 50, 100, 250, 500, 1000, 2500, 5000},
 	}, []string{"name"})
 
+	// Trace fetch latency histogram
+	traceFetchLatencyHist := promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "query_load_test",
+		Subsystem: "trace_fetch",
+		Name:      "latency_seconds",
+		Help:      "Trace fetch latency in seconds",
+	}, []string{"query_name"})
+
+	// Trace fetch failures counter
+	traceFetchFailuresCounter := promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "query_load_test",
+		Subsystem: "trace_fetch",
+		Name:      "failures_total",
+		Help:      "Total trace fetch failures",
+	}, []string{"query_name", "status_code"})
+
 	slog.Info("metrics initialized", "namespace", namespace, "sanitized_namespace", sanitizedNs)
 
 	return &Metrics{
-		QueryLatencyHist:     queryLatencyHist,
-		QueryFailuresCounter: queryFailuresCounter,
-		BucketQueryCounter:   bucketQueryCounter,
-		BucketDurationHist:   bucketDurationHist,
-		SpansReturnedHist:    spansReturnedHist,
+		QueryLatencyHist:         queryLatencyHist,
+		QueryFailuresCounter:     queryFailuresCounter,
+		BucketQueryCounter:       bucketQueryCounter,
+		BucketDurationHist:       bucketDurationHist,
+		SpansReturnedHist:        spansReturnedHist,
+		TraceFetchLatencyHist:    traceFetchLatencyHist,
+		TraceFetchFailuresCounter: traceFetchFailuresCounter,
 	}
 }
 

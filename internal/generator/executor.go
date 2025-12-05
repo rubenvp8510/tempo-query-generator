@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
-	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -21,37 +20,19 @@ const (
 
 // Executor handles query execution with rate limiting and concurrency
 type Executor struct {
-	name            string
-	namespace       string
-	queryEndpoint   string
-	traceQL         string
-	delay           time.Duration
-	timeBuckets     []config.TimeBucket
-	concurrency     int
-	tenantID        string
-	targetQPS       float64
-	burstMultiplier float64
-	limit           int
-	executionPlan   []config.PlanEntry
-	metrics         *Metrics
-}
-
-// planIndices stores atomic counters for each query name to cycle through plan entries
-var planIndices = make(map[string]*int64)
-var planIndicesMutex sync.Mutex
-
-// getPlanIndex returns the atomic counter for a given query name, creating it if needed
-func getPlanIndex(queryName string) *int64 {
-	planIndicesMutex.Lock()
-	defer planIndicesMutex.Unlock()
-
-	if idx, exists := planIndices[queryName]; exists {
-		return idx
-	}
-
-	idx := new(int64)
-	planIndices[queryName] = idx
-	return idx
+	queries          map[string]config.QueryDefinition
+	namespace        string
+	queryEndpoint    string
+	delay            time.Duration
+	timeBuckets      []config.TimeBucket
+	concurrency      int
+	tenantID         string
+	targetQPS        float64
+	burstMultiplier  float64
+	limit            int
+	executionPlan    []config.PlanEntry
+	metrics          *Metrics
+	clickProbability float64
 }
 
 // createTempoClient creates a Tempo client with token fallback logic
@@ -71,9 +52,10 @@ func createTempoClient(queryEndpoint, tenantID, tokenPath string) (*client.Tempo
 	return tempoClient, nil
 }
 
-// NewExecutor creates a new query executor
+// NewExecutor creates a new query executor that handles multiple queries
 func NewExecutor(
-	name, namespace, queryEndpoint, traceQL, tenantID string,
+	queries map[string]config.QueryDefinition,
+	namespace, queryEndpoint, tenantID string,
 	delay time.Duration,
 	timeBuckets []config.TimeBucket,
 	concurrency int,
@@ -81,21 +63,22 @@ func NewExecutor(
 	limit int,
 	executionPlan []config.PlanEntry,
 	metrics *Metrics,
+	clickProbability float64,
 ) *Executor {
 	return &Executor{
-		name:            name,
-		namespace:       namespace,
-		queryEndpoint:   queryEndpoint,
-		traceQL:         traceQL,
-		delay:           delay,
-		timeBuckets:     timeBuckets,
-		concurrency:     concurrency,
-		tenantID:        tenantID,
-		targetQPS:       targetQPS,
-		burstMultiplier: burstMultiplier,
-		limit:           limit,
-		executionPlan:   executionPlan,
-		metrics:         metrics,
+		queries:          queries,
+		namespace:        namespace,
+		queryEndpoint:    queryEndpoint,
+		delay:            delay,
+		timeBuckets:      timeBuckets,
+		concurrency:      concurrency,
+		tenantID:         tenantID,
+		targetQPS:        targetQPS,
+		burstMultiplier:  burstMultiplier,
+		limit:            limit,
+		executionPlan:    executionPlan,
+		metrics:          metrics,
+		clickProbability: clickProbability,
 	}
 }
 
@@ -107,38 +90,47 @@ func (e *Executor) Run() error {
 		return err
 	}
 
-	slog.Info("starting query executor", "query", e.name, "concurrency", e.concurrency, "target_qps", e.targetQPS)
+	// Calculate per-worker QPS for fair distribution
+	perWorkerQPS := e.targetQPS / float64(e.concurrency)
+	slog.Info("starting query executor", "total_concurrency", e.concurrency, "target_qps", e.targetQPS, "per_worker_qps", perWorkerQPS)
 
 	// Track when this executor started for time-aware bucket selection
 	testStartTime := time.Now()
 
-	// Create a shared rate limiter for all workers of this query type
-	// The limiter ensures total QPS for this query type equals targetQPS
-	// Calculate burst size: allow 1-2 seconds of burst capacity for better rate accuracy
-	burstSize := int(math.Max(10, e.targetQPS*e.burstMultiplier))
-	limiter := rate.NewLimiter(rate.Limit(e.targetQPS), burstSize)
-	slog.Info("rate limiter configured", "query", e.name, "qps", e.targetQPS, "burst", burstSize, "multiplier", e.burstMultiplier)
+	// Calculate burst size for per-worker limiters
+	burstSize := int(math.Max(10, perWorkerQPS*e.burstMultiplier))
+	slog.Info("rate limiter configured", "per_worker_qps", perWorkerQPS, "burst", burstSize, "multiplier", e.burstMultiplier)
 
-	// Launch N independent workers for concurrent execution
+	// Launch N independent workers for concurrent execution with staggered starting positions
+	planLength := int64(len(e.executionPlan))
 	for i := 0; i < e.concurrency; i++ {
 		workerID := i + 1
 		// Each worker starts with a small random initial delay to spread the load
 		initialDelay := time.Duration(rand.Int63n(int64(time.Second)))
+
+		// Calculate staggered starting position in execution plan for better distribution
+		// This ensures workers don't all start at the same position, reducing cache effects
+		initialPlanIndex := (int64(i) * planLength) / int64(e.concurrency)
+
+		// Create per-worker rate limiter for fair distribution
+		limiter := rate.NewLimiter(rate.Limit(perWorkerQPS), burstSize)
 
 		// Create and start worker using builder pattern
 		worker := NewWorkerBuilder().
 			WithWorkerID(workerID).
 			WithTempoClient(tempoClient).
 			WithLimiter(limiter).
-			WithName(e.name).
-			WithTraceQL(e.traceQL).
+			WithQueries(e.queries).
 			WithTimeBuckets(e.timeBuckets).
 			WithExecutionPlan(e.executionPlan).
 			WithMetrics(e.metrics).
 			WithLimit(e.limit).
 			WithTestStartTime(testStartTime).
+			WithInitialPlanIndex(initialPlanIndex).
+			WithClickProbability(e.clickProbability).
 			Build()
 
+		slog.Debug("worker starting position", "worker_id", workerID, "initial_plan_index", initialPlanIndex)
 		go worker.Run(initialDelay)
 	}
 

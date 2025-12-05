@@ -133,3 +133,42 @@ func (c *TempoClient) Search(ctx context.Context, traceQL string, startTime, end
 
 	return &searchResp, res, nil
 }
+
+// GetTrace retrieves a full trace by traceID
+// This method consumes the response body to ensure the full payload is transferred
+func (c *TempoClient) GetTrace(ctx context.Context, traceID string) (*http.Response, error) {
+	// Construct the URL: {queryEndpoint}/api/traces/v1/{tenantID}/api/traces/{traceID}
+	url := fmt.Sprintf("%s/api/traces/v1/%s/api/traces/%s", c.queryEndpoint, c.tenantID, traceID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating http request: %w", err)
+	}
+
+	// Add authentication header if token is available
+	if c.token != nil {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", string(c.token)))
+	}
+
+	// Add tenant ID header for multitenancy
+	if c.tenantID != "" {
+		req.Header.Set("X-Scope-OrgID", c.tenantID)
+	}
+
+	// Make the HTTP request
+	res, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error making http request: %w", err)
+	}
+
+	// Consume the response body to ensure the full payload is transferred
+	// This ensures the backend does the work of assembling the trace
+	_, err = io.ReadAll(res.Body)
+	if err != nil {
+		res.Body.Close()
+		return res, fmt.Errorf("error reading response body: %w", err)
+	}
+	res.Body.Close()
+
+	return res, nil
+}

@@ -33,8 +33,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	concurrentQueries := cfg.Query.ConcurrentQueries
-	slog.Info("concurrent queries per executor", "count", concurrentQueries)
+	totalConcurrency := cfg.Query.TotalConcurrency
+	slog.Info("total concurrent workers", "count", totalConcurrency)
 
 	// Apply QPS multiplier if configured (for compensation)
 	targetQPS := cfg.Query.TargetQPS
@@ -45,8 +45,19 @@ func main() {
 		slog.Info("target total QPS", "qps", targetQPS)
 	}
 
+	// Calculate per-worker QPS for fair distribution
+	perWorkerQPS := targetQPS / float64(totalConcurrency)
+	slog.Info("per-worker QPS", "qps", perWorkerQPS)
+
 	slog.Info("rate limiter burst multiplier", "multiplier", cfg.Query.BurstMultiplier)
 	slog.Info("query result limit", "limit", cfg.Query.Limit)
+
+	// Set default click probability if not configured
+	clickProbability := cfg.Query.ClickProbability
+	if clickProbability == 0.0 {
+		clickProbability = 0.5 // Default: 50% of searches will fetch full trace
+	}
+	slog.Info("trace fetch click probability", "probability", clickProbability)
 
 	// Convert time buckets (already validated in config package)
 	timeBuckets, err := config.ConvertTimeBuckets(cfg.TimeBuckets)
@@ -58,9 +69,11 @@ func main() {
 
 	slog.Info("loaded queries from configuration", "count", len(cfg.Queries))
 
-	// Calculate per-query QPS: total QPS divided by number of query types
-	perQueryQPS := targetQPS / float64(len(cfg.Queries))
-	slog.Info("per-query QPS", "qps", perQueryQPS, "concurrent_workers", concurrentQueries)
+	// Create query lookup map for fast access by name
+	queriesMap := make(map[string]config.QueryDefinition)
+	for _, q := range cfg.Queries {
+		queriesMap[q.Name] = q
+	}
 
 	slog.Info("loaded execution plan from config", "entry_count", len(cfg.ExecutionPlan))
 
@@ -75,27 +88,25 @@ func main() {
 		slog.Info("query plan entries", "query", queryName, "entry_count", count, "note", "will cycle/repeat as needed")
 	}
 
-	// Create and start query executors
-	for _, q := range cfg.Queries {
-		executor := generator.NewExecutor(
-			q.Name,
-			cfg.Namespace,
-			cfg.Tempo.QueryEndpoint,
-			q.TraceQL,
-			cfg.TenantID,
-			queryDelay,
-			timeBuckets,
-			concurrentQueries,
-			perQueryQPS,
-			cfg.Query.BurstMultiplier,
-			cfg.Query.Limit,
-			cfg.ExecutionPlan,
-			metrics,
-		)
-		if err := executor.Run(); err != nil {
-			slog.Error("could not run query executor", "error", err)
-			os.Exit(1)
-		}
+	// Create and start single executor for all queries
+	executor := generator.NewExecutor(
+		queriesMap,
+		cfg.Namespace,
+		cfg.Tempo.QueryEndpoint,
+		cfg.TenantID,
+		queryDelay,
+		timeBuckets,
+		totalConcurrency,
+		targetQPS,
+		cfg.Query.BurstMultiplier,
+		cfg.Query.Limit,
+		cfg.ExecutionPlan,
+		metrics,
+		clickProbability,
+	)
+	if err := executor.Run(); err != nil {
+		slog.Error("could not run query executor", "error", err)
+		os.Exit(1)
 	}
 
 	http.Handle("/metrics", promhttp.Handler())
