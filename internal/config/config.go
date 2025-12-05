@@ -31,17 +31,12 @@ func SetDefaults(cfg *Config) {
 	}
 }
 
-// LoadAndValidate loads configuration using Viper with environment variable support and validates it
+// LoadAndValidate loads configuration from YAML file and validates it
 func LoadAndValidate() (*Config, error) {
 	v := viper.New()
 
-	// Set environment variable prefix
-	v.SetEnvPrefix("TEMPO")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-
 	// Get config file path from environment variable (default to /config/config.yaml)
-	configPath := v.GetString("CONFIG_FILE")
+	configPath := os.Getenv("TEMPO_CONFIG_FILE")
 	if configPath == "" {
 		configPath = os.Getenv("CONFIG_FILE")
 		if configPath == "" {
