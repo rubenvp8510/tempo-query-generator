@@ -1,0 +1,181 @@
+tempo:
+  queryEndpoint: "https://tempo-simplest-gateway:8080"
+
+namespace: "tempo-perf-test"
+tenantId: "tenant-1"
+
+query:
+  delay: "5s"
+  concurrentQueries: 5
+  targetQPS: 50  # Total queries per second across all query types
+  burstMultiplier: 2.0  # Rate limiter burst = targetQPS * burstMultiplier (allows catching up)
+  qpsMultiplier: 1.0     # Multiplier to apply to targetQPS for compensation (default: 1.0)
+  limit: 1000           # Maximum number of results to return per query (default: 1000)
+
+timeBuckets:
+  - name: "recent"
+    ageStart: "10s"
+    ageEnd: "1m"
+    weight: 50
+  - name: "ingester"
+    ageStart: "1m"
+    ageEnd: "5m"
+    weight: 40
+  - name: "backend"
+    ageStart: "5m"
+    ageEnd: "15m"
+    weight: 10
+
+queries:
+  # ============================================
+  # Simple Resource Queries
+  # ============================================
+  - name: "resource_service_loadtest"
+    traceql: '{ resource.service.name = "frontend" }'
+  - name: "resource_service_api_gateway"
+    traceql: '{ resource.service.name = "api-gateway" }'
+  - name: "resource_service_order"
+    traceql: '{ resource.service.name = "order-service" }'
+
+  # ============================================
+  # Span Attribute Queries
+  # ============================================
+  - name: "span_http_get"
+    traceql: '{ span.http.method = "GET" }'
+  - name: "span_http_post"
+    traceql: '{ span.http.method = "POST" }'
+  - name: "span_http_status_200"
+    traceql: '{ span.http.status_code = 200 }'
+  - name: "span_http_status_error"
+    traceql: '{ span.http.status_code >= 400 }'
+  - name: "span_http_status_server_error"
+    traceql: '{ span.http.status_code >= 500 }'
+
+  # ============================================
+  # Duration Intrinsic Queries
+  # ============================================
+  - name: "duration_gt_100ms"
+    traceql: '{ duration > 100ms }'
+  - name: "duration_gt_500ms"
+    traceql: '{ duration > 500ms }'
+  - name: "duration_gt_1s"
+    traceql: '{ duration > 1s }'
+  - name: "duration_lt_50ms"
+    traceql: '{ duration < 50ms }'
+  - name: "duration_range_100ms_500ms"
+    traceql: '{ duration > 100ms && duration < 500ms }'
+
+  # ============================================
+  # Status Intrinsic Queries
+  # ============================================
+  - name: "status_error"
+    traceql: '{ status = error }'
+  - name: "status_ok"
+    traceql: '{ status = ok }'
+
+  # ============================================
+  # Kind Intrinsic Queries
+  # ============================================
+  - name: "kind_server"
+    traceql: '{ kind = server }'
+  - name: "kind_client"
+    traceql: '{ kind = client }'
+
+  # ============================================
+  # Simple Logic Queries (&&, ||)
+  # ============================================
+  - name: "logic_service_and_slow"
+    traceql: '{ resource.service.name = "frontend" && duration > 500ms }'
+  - name: "logic_post_and_slow"
+    traceql: '{ span.http.method = "POST" && duration > 200ms }'
+  - name: "logic_get_and_error"
+    traceql: '{ span.http.method = "GET" && status = error }'
+  - name: "logic_service_and_http_error"
+    traceql: '{ resource.service.name = "api-gateway" && span.http.status_code >= 500 }'
+  - name: "logic_or_services"
+    traceql: '{ resource.service.name = "frontend" || resource.service.name = "api-gateway" }'
+  - name: "logic_or_methods"
+    traceql: '{ span.http.method = "PUT" || span.http.method = "DELETE" }'
+
+  # ============================================
+  # Negation Queries (!=)
+  # ============================================
+  - name: "negation_not_ok"
+    traceql: '{ status != ok }'
+  - name: "negation_not_200"
+    traceql: '{ span.http.status_code != 200 }'
+
+# ============================================
+# Execution Plan
+# ============================================
+# Define the query execution pattern here.
+# The generator will cycle through these entries in order.
+# Time ranges are computed dynamically based on buckets.
+# Customize this plan to control query distribution and time bucket usage.
+
+executionPlan:
+  # Resource queries - favor recent and ingester buckets
+  - queryName: "resource_service_loadtest"
+    bucketName: "recent"
+  - queryName: "resource_service_api_gateway"
+    bucketName: "ingester"
+  - queryName: "resource_service_order"
+    bucketName: "recent"
+  
+  # HTTP method/status queries - spread across buckets
+  - queryName: "span_http_get"
+    bucketName: "recent"
+  - queryName: "span_http_post"
+    bucketName: "ingester"
+  - queryName: "span_http_status_200"
+    bucketName: "recent"
+  - queryName: "span_http_status_error"
+    bucketName: "ingester"
+  - queryName: "span_http_status_server_error"
+    bucketName: "recent"
+  
+  # Duration queries - spread across buckets
+  - queryName: "duration_gt_100ms"
+    bucketName: "ingester"
+  - queryName: "duration_gt_500ms"
+    bucketName: "recent"
+  - queryName: "duration_gt_1s"
+    bucketName: "backend"
+  - queryName: "duration_lt_50ms"
+    bucketName: "ingester"
+  - queryName: "duration_range_100ms_500ms"
+    bucketName: "recent"
+  
+  # Status queries - favor recent and ingester
+  - queryName: "status_error"
+    bucketName: "recent"
+  - queryName: "status_ok"
+    bucketName: "ingester"
+  
+  # Kind queries - spread across buckets
+  - queryName: "kind_server"
+    bucketName: "recent"
+  - queryName: "kind_client"
+    bucketName: "ingester"
+  
+  # Simple AND logic queries - favor recent and ingester
+  - queryName: "logic_service_and_slow"
+    bucketName: "recent"
+  - queryName: "logic_post_and_slow"
+    bucketName: "ingester"
+  - queryName: "logic_get_and_error"
+    bucketName: "recent"
+  - queryName: "logic_service_and_http_error"
+    bucketName: "ingester"
+  
+  # OR logic queries - spread across buckets
+  - queryName: "logic_or_services"
+    bucketName: "recent"
+  - queryName: "logic_or_methods"
+    bucketName: "ingester"
+  
+  # Negation queries - favor recent and ingester
+  - queryName: "negation_not_ok"
+    bucketName: "recent"
+  - queryName: "negation_not_200"
+    bucketName: "ingester"

@@ -1,0 +1,170 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: prometheus-k8s
+  namespace: tempo-perf-test
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/instance: k8s
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kube-prometheus
+    app.kubernetes.io/version: 2.36.2
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - services
+      - endpoints
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: prometheus
+    app.kubernetes.io/instance: k8s
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: kube-prometheus
+    app.kubernetes.io/version: 2.36.2
+  name: prometheus-k8s
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: prometheus-k8s
+subjects:
+  - kind: ServiceAccount
+    name: prometheus-k8s
+    namespace: monitoring
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: query-load-generator
+  namespace: tempo-perf-test
+spec:
+  namespaceSelector: {}
+  selector:
+    matchLabels:
+      app: query-load-generator
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 2s
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: query-load-account
+  namespace: tempo-perf-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admin-sa-binding
+  namespace: tempo-perf-test
+subjects:
+  - kind: ServiceAccount
+    name: query-load-account
+    namespace: tempo-perf-test
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# Grant the query-load-account Service Account permission to read traces from the 'tenant-1' tenant
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: allow-read-traces-tenant-1
+rules:
+- apiGroups: [tempo.grafana.com]
+  resources: [tenant-1]  # tenantName
+  resourceNames: [traces]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: allow-read-traces-tenant-1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: allow-read-traces-tenant-1
+subjects:
+- kind: ServiceAccount
+  name: query-load-account
+  namespace: tempo-perf-test
+---
+# Grant the query-load-account ServiceAccount view permissions of the tempo-perf-test namespace.
+# If the ServiceAccount cannot access any namespaces, every 'get' request will be denied:
+# https://github.com/observatorium/opa-openshift/pull/18/files
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: view-namespace-tenant-1
+  namespace: tempo-perf-test
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+subjects:
+- kind: ServiceAccount
+  name: query-load-account
+  namespace: tempo-perf-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: query-load-generator
+  namespace: tempo-perf-test
+  labels:
+    app: query-load-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: query-load-generator
+  template:
+    metadata:
+      labels:
+        app: query-load-generator
+    spec:
+      serviceAccountName: query-load-account
+      containers:
+        - name: app
+          image: quay.io/rvargasp/query-load-generator:latest
+          imagePullPolicy: Always
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+          ports:
+            - containerPort: 2112
+              name: metrics
+          env:
+            - name: CONFIG_FILE
+              value: /config/config.yaml
+      volumes:
+        - name: config
+          configMap:
+            name: query-load-config
+
