@@ -76,6 +76,30 @@ func main() {
 		queriesMap[q.Name] = q
 	}
 
+	// Get seed for deterministic random number generation
+	seed := cfg.Query.Seed
+	slog.Info("using seed for deterministic load generation", "seed", seed, "note", "each worker uses seed + workerID")
+
+	// Parse time window jitter (optional, defaults to 0 if not set)
+	var jitter time.Duration
+	if cfg.Query.TimeWindowJitter != "" {
+		var err error
+		jitter, err = time.ParseDuration(cfg.Query.TimeWindowJitter)
+		if err != nil {
+			slog.Error("could not parse time window jitter", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("time window jitter enabled", "jitter", jitter, "note", "random time shifts will be applied to query windows to defeat caching")
+	} else {
+		slog.Info("time window jitter disabled", "note", "query windows will use fixed boundaries")
+	}
+
+	// Get cache bypass setting
+	bypassCache := cfg.Query.BypassCache
+	if bypassCache {
+		slog.Info("cache bypass enabled", "note", "Cache-Control headers will be sent with requests")
+	}
+
 	slog.Info("loaded execution plan from config", "entry_count", len(cfg.ExecutionPlan))
 
 	// Count entries per query for logging
@@ -86,7 +110,7 @@ func main() {
 
 	slog.Info("plan distribution across queries")
 	for queryName, count := range queryDist {
-		slog.Info("query plan entries", "query", queryName, "entry_count", count, "note", "will cycle/repeat as needed")
+		slog.Info("query plan entries", "query", queryName, "entry_count", count, "note", "weighted random selection based on bucket weights")
 	}
 
 	// Create and start single executor for all queries
@@ -102,8 +126,11 @@ func main() {
 		cfg.Query.BurstMultiplier,
 		cfg.Query.Limit,
 		cfg.ExecutionPlan,
+		seed,
 		m,
 		traceFetchProbability,
+		bypassCache,
+		jitter,
 	)
 	if err := executor.Run(); err != nil {
 		slog.Error("could not run query executor", "error", err)

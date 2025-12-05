@@ -17,6 +17,7 @@ type TempoClient struct {
 	tenantID      string
 	token         []byte
 	httpClient    *http.Client
+	bypassCache   bool
 }
 
 // NewTempoClient creates a new Tempo client with token read from file path
@@ -48,7 +49,13 @@ func NewTempoClient(queryEndpoint, tenantID, tokenPath string) (*TempoClient, er
 		tenantID:      tenantID,
 		token:         token,
 		httpClient:    httpClient,
+		bypassCache:   false,
 	}, nil
+}
+
+// SetBypassCache sets whether to bypass cache by adding Cache-Control headers
+func (c *TempoClient) SetBypassCache(bypass bool) {
+	c.bypassCache = bypass
 }
 
 // NewTempoClientWithToken creates a new Tempo client with token provided directly
@@ -68,18 +75,20 @@ func NewTempoClientWithToken(queryEndpoint, tenantID string, token []byte) (*Tem
 		tenantID:      tenantID,
 		token:         token,
 		httpClient:    httpClient,
+		bypassCache:   false,
 	}, nil
 }
 
 // Search performs a Tempo search query and returns the parsed response
 // startTime and endTime are optional - if both are nil, no time range is added to the query
-func (c *TempoClient) Search(ctx context.Context, traceQL string, startTime, endTime *time.Time, limit int) (*TempoSearchResponse, *http.Response, error) {
+// Returns the response body size in bytes as the fourth return value
+func (c *TempoClient) Search(ctx context.Context, traceQL string, startTime, endTime *time.Time, limit int) (*TempoSearchResponse, *http.Response, int, error) {
 	// Construct the URL: {queryEndpoint}/api/traces/v1/{tenantID}/tempo/api/search
 	url := fmt.Sprintf("%s/api/traces/v1/%s/tempo/api/search", c.queryEndpoint, c.tenantID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error creating http request: %w", err)
+		return nil, nil, 0, fmt.Errorf("error creating http request: %w", err)
 	}
 
 	// Add authentication header if token is available
@@ -90,6 +99,12 @@ func (c *TempoClient) Search(ctx context.Context, traceQL string, startTime, end
 	// Add tenant ID header for multitenancy
 	if c.tenantID != "" {
 		req.Header.Set("X-Scope-OrgID", c.tenantID)
+	}
+
+	// Add cache-busting headers if configured
+	if c.bypassCache {
+		req.Header.Set("Cache-Control", "no-cache, no-store")
+		req.Header.Set("Pragma", "no-cache")
 	}
 
 	// Build query parameters
@@ -109,40 +124,43 @@ func (c *TempoClient) Search(ctx context.Context, traceQL string, startTime, end
 	// Make the HTTP request
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("error making http request: %w", err)
+		return nil, nil, 0, fmt.Errorf("error making http request: %w", err)
 	}
 
 	// Read response body
 	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		res.Body.Close()
-		return nil, res, fmt.Errorf("error reading response body: %w", err)
+		return nil, res, 0, fmt.Errorf("error reading response body: %w", err)
 	}
 	res.Body.Close()
 
+	bodySize := len(body)
+
 	// Check for HTTP errors
 	if res.StatusCode >= 300 {
-		return nil, res, fmt.Errorf("query failed with status %d: %s", res.StatusCode, string(body))
+		return nil, res, bodySize, fmt.Errorf("query failed with status %d: %s", res.StatusCode, string(body))
 	}
 
 	// Parse JSON response
 	var searchResp TempoSearchResponse
 	if err := json.Unmarshal(body, &searchResp); err != nil {
-		return nil, res, fmt.Errorf("error parsing response JSON: %w", err)
+		return nil, res, bodySize, fmt.Errorf("error parsing response JSON: %w", err)
 	}
 
-	return &searchResp, res, nil
+	return &searchResp, res, bodySize, nil
 }
 
 // GetTrace retrieves a full trace by traceID
 // This method consumes the response body to ensure the full payload is transferred
-func (c *TempoClient) GetTrace(ctx context.Context, traceID string) (*http.Response, error) {
+// Returns the response body size in bytes as the second return value
+func (c *TempoClient) GetTrace(ctx context.Context, traceID string) (*http.Response, int, error) {
 	// Construct the URL: {queryEndpoint}/api/traces/v1/{tenantID}/api/traces/{traceID}
 	url := fmt.Sprintf("%s/api/traces/v1/%s/api/traces/%s", c.queryEndpoint, c.tenantID, traceID)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("error creating http request: %w", err)
+		return nil, 0, fmt.Errorf("error creating http request: %w", err)
 	}
 
 	// Add authentication header if token is available
@@ -158,17 +176,18 @@ func (c *TempoClient) GetTrace(ctx context.Context, traceID string) (*http.Respo
 	// Make the HTTP request
 	res, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("error making http request: %w", err)
+		return nil, 0, fmt.Errorf("error making http request: %w", err)
 	}
 
 	// Consume the response body to ensure the full payload is transferred
 	// This ensures the backend does the work of assembling the trace
-	_, err = io.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 		res.Body.Close()
-		return res, fmt.Errorf("error reading response body: %w", err)
+		return res, 0, fmt.Errorf("error reading response body: %w", err)
 	}
 	res.Body.Close()
 
-	return res, nil
+	bodySize := len(body)
+	return res, bodySize, nil
 }

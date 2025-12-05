@@ -10,22 +10,25 @@ query:
   targetQPS: 50         # Total queries per second across all workers (distributed as targetQPS / totalConcurrency per worker)
   burstMultiplier: 2.0  # Rate limiter burst multiplier (per-worker burst = perWorkerQPS * burstMultiplier)
   qpsMultiplier: 1.0    # Multiplier to apply to targetQPS for compensation (default: 1.0)
-  limit: 1000           # Maximum number of results to return per query (default: 1000)
-  clickProbability: 0.5 # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
+  limit: 1000                  # Maximum number of results to return per query (default: 1000)
+  traceFetchProbability: 0.5   # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
+  seed: 42                     # Seed for deterministic random number generation (each worker uses seed + workerID)
+  bypassCache: false           # Force cache bypass by sending Cache-Control headers (default: false)
+  timeWindowJitter: "5m"       # Random shift for time windows to defeat caching (e.g. "5m", "0s" to disable, default: "0s")
 
 timeBuckets:
   - name: "recent"
     ageStart: "10s"
     ageEnd: "1m"
-    weight: 50
+    weight: 10  # Higher weight = selected more often
   - name: "ingester"
     ageStart: "1m"
     ageEnd: "5m"
-    weight: 40
+    weight: 5
   - name: "backend"
     ageStart: "5m"
     ageEnd: "15m"
-    weight: 10
+    weight: 2
 
 queries:
   # ============================================
@@ -110,10 +113,9 @@ queries:
 # Execution Plan
 # ============================================
 # Define the query execution pattern here.
-# Workers cycle through these entries deterministically with staggered starting positions.
-# Query frequency is determined by how often a query appears in this plan.
-# Time ranges are computed dynamically based on buckets.
-# Workers start at evenly distributed positions to ensure immediate query diversity.
+# Workers use weighted random selection to pick entries from this plan.
+# The weight comes from the bucket's weight in the timeBuckets config.
+# Workers use seed + workerID for deterministic but unique sequences.
 
 executionPlan:
   # Resource queries - favor recent and ingester buckets

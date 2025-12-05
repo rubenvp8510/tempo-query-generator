@@ -34,14 +34,21 @@ The tool uses a time bucket system to distribute queries across different time r
 - **Total Concurrency Control**: Configure the exact number of concurrent workers via `totalConcurrency` (e.g., `totalConcurrency: 50` creates exactly 50 concurrent workers).
 - **Per-Worker Rate Limiting**: Each worker has an independent rate limiter set to `targetQPS / totalConcurrency` for fair distribution and predictable behavior.
 - **Staggered Start Positions**: Workers start at evenly distributed positions in the execution plan to ensure immediate query diversity and reduce cache effects.
-- **Initial Delay**: Workers start with a small random delay (0-1 second) to spread the initial load and avoid thundering herd effects.
+- **Initial Delay**: Workers start with a small random delay (up to `query.delay`, default 5s) to spread the initial load and avoid thundering herd effects.
 
 ### Query Distribution
 
-- **Deterministic Cycling**: Workers cycle through all execution plan entries in order, with each worker maintaining its own position in the cycle.
-- **Staggered Positions**: Workers start at evenly distributed positions: worker N starts at `(N * planLength) / totalWorkers`, ensuring immediate query diversity.
-- **Plan-Based Distribution**: Query frequency is determined by the execution plan - queries with more entries in the plan are executed more frequently.
-- **Reproducible Patterns**: The same configuration produces the same query pattern across test runs, enabling reliable performance comparisons.
+- **Weighted Random Selection**: Workers select queries from the execution plan based on the weights defined in `timeBuckets`. Buckets with higher weights are selected more frequently.
+- **Deterministic Randomness**: A configurable `seed` ensures that the random selection is reproducible across runs. Each worker uses `seed + workerID` to initialize its random number generator.
+- **Staggered Start**: Workers start with a random initial delay (up to `query.delay`) to spread the initial load and avoid thundering herd effects.
+- **Plan-Based Distribution**: Query frequency is determined by the execution plan - queries with more entries in the plan or entries pointing to higher-weight buckets are executed more frequently.
+
+### Cache Defeat Mechanisms
+
+To ensure performance tests exercise the system under realistic conditions (or worst-case scenarios), the tool provides mechanisms to defeat caching:
+
+- **Time Window Jitter**: Configurable via `timeWindowJitter` (e.g., "5m"). Randomly shifts the start and end times of query windows by up to +/- jitter amount while preserving the window duration. This prevents repeated queries from hitting the exact same time range cache keys.
+- **Cache Bypass**: Configurable via `bypassCache`. When enabled, sends `Cache-Control: no-cache` headers with requests to force Tempo to bypass its cache.
 
 ### Search-and-Fetch Workflow
 
@@ -61,6 +68,8 @@ The tool exposes Prometheus metrics on port 2112 (`/metrics` endpoint) for monit
 - Spans returned histograms
 - Trace fetch latency histograms
 - Trace fetch failure counters
+- Response size histograms
+- Active workers gauge
 
 ## How to Use the Tool
 
@@ -85,12 +94,15 @@ query:
   qpsMultiplier: 1.0             # Optional QPS compensation multiplier
   limit: 1000                     # Maximum results per query
   traceFetchProbability: 0.5     # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
+  seed: 42                       # Seed for deterministic random number generation (default: 0)
+  bypassCache: false             # Force cache bypass by sending Cache-Control headers (default: false)
+  timeWindowJitter: "5m"         # Random shift for time windows to defeat caching (e.g. "5m", "0s" to disable, default: "0s")
 
 timeBuckets:
   - name: "recent"
     ageStart: "10s"               # Query window ends this far back
     ageEnd: "1m"                  # Query window starts this far back
-    weight: 50                    # Weight for random selection (if used)
+    weight: 50                    # Weight for random selection (higher = selected more often)
   - name: "ingester"
     ageStart: "1m"
     ageEnd: "5m"
@@ -243,6 +255,8 @@ Key metrics:
 - `query_load_test_spans_returned_<namespace>_<query_name>` - Spans returned histogram
 - `query_load_test_trace_fetch_latency_seconds{query_name}` - Trace fetch latency histogram
 - `query_load_test_trace_fetch_failures_total{query_name,status_code}` - Trace fetch failure counter
+- `query_load_test_response_size_bytes{type,query_name}` - Response size histogram
+- `query_load_test_workers_active` - Active workers gauge
 
 ## Code Organization
 
@@ -264,11 +278,13 @@ tempo-query-generator/
 │   ├── config/
 │   │   ├── config.go            # Configuration loading and validation
 │   │   └── types.go             # Configuration type definitions
-│   └── generator/
-│       ├── executor.go          # Query executor with rate limiting
-│       ├── worker.go            # Individual query worker
-│       ├── bucket.go            # Time bucket selection logic
-│       └── metrics.go           # Prometheus metrics definitions
+│   ├── generator/
+│   │   └── executor.go          # Query executor with rate limiting
+│   ├── metrics/
+│   │   └── metrics.go           # Prometheus metrics definitions
+│   └── worker/
+│       ├── builder.go           # Worker builder pattern
+│       └── worker.go            # Individual query worker and bucket selection logic
 ├── config.yaml                  # Default configuration file
 ├── Dockerfile                   # Container build definition
 ├── Makefile                     # Build automation
@@ -331,20 +347,23 @@ A utility tool that:
 - Spawns workers with staggered starting positions in the execution plan
 - Tracks test start time for time bucket eligibility
 
+#### `internal/worker/`
+
 **`worker.go`**: Individual query execution worker:
 - `Worker` - Executes queries in a loop
 - Uses builder pattern for flexible construction
-- Cycles through all execution plan entries using per-worker counter
-- Starts at staggered position for immediate query diversity
+- Selects from execution plan using weighted random selection based on bucket weights
+- Starts with random initial delay for immediate query diversity
 - Looks up query definitions dynamically from execution plan
 - Selects time buckets based on execution plan
+- Applies time window jitter if configured to defeat caching
 - Records metrics for each query execution
 - Handles rate limiting via independent per-worker limiter
 - Implements search-and-fetch workflow: after successful searches, probabilistically fetches full trace details
 
-**`bucket.go`**: Time bucket selection logic:
-- `SelectTimeBucket()` - Weighted random selection from eligible buckets
-- Filters buckets based on elapsed time since test start
+**`builder.go`**: Builder pattern for constructing workers.
+
+#### `internal/metrics/`
 
 **`metrics.go`**: Prometheus metrics definitions:
 - `Metrics` - Container for all metric collectors
@@ -368,17 +387,15 @@ A utility tool that:
 3. **Worker Spawning** (`executor.go`):
    - Spawn `totalConcurrency` workers total
    - Each worker gets independent rate limiter at per-worker QPS
-   - Calculate staggered starting position: `(workerID * planLength) / totalWorkers`
-   - Each worker starts with random initial delay (0-1 second)
+   - Each worker starts with random initial delay (up to `query.delay`)
    - Workers run concurrently in separate goroutines
 
 4. **Query Execution Loop** (`worker.go`):
    - Worker waits for its independent rate limiter permission
-   - Increments per-worker counter to get next plan entry index
-   - Cycles through all execution plan entries
+   - Selects next plan entry using weighted random selection based on bucket weights
    - Looks up query definition by name from plan entry
-   - Determines time bucket and calculates time range
-   - Executes search query via Tempo client
+   - Determines time bucket and calculates time range (applying jitter if configured)
+   - Executes search query via Tempo client (with cache bypass if configured)
    - Records metrics (latency, spans, failures)
    - **Search-and-Fetch**: If search succeeds and `traceFetchProbability` threshold is met:
      - Extracts trace ID from first search result

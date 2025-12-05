@@ -15,13 +15,16 @@ type TempoConfig struct {
 
 // QueryConfig represents query execution configuration
 type QueryConfig struct {
-	Delay             string  `yaml:"delay" mapstructure:"delay" validate:"required"`
-	TotalConcurrency  int     `yaml:"totalConcurrency" mapstructure:"totalConcurrency" validate:"required,gte=1"`
-	TargetQPS         float64 `yaml:"targetQPS" mapstructure:"targetQPS" validate:"required,gt=0"`
-	BurstMultiplier   float64 `yaml:"burstMultiplier" mapstructure:"burstMultiplier" validate:"omitempty,gt=0"` // Multiplier for rate limiter burst size (default: 2.0)
-	QPSMultiplier         float64 `yaml:"qpsMultiplier" mapstructure:"qpsMultiplier" validate:"omitempty,gt=0"`         // Multiplier to apply to targetQPS for compensation (default: 1.0)
-	Limit                 int     `yaml:"limit" mapstructure:"limit" validate:"omitempty,gt=0"`                         // Maximum number of results to return per query (default: 1000)
+	Delay                 string  `yaml:"delay" mapstructure:"delay" validate:"required"`
+	TotalConcurrency      int     `yaml:"totalConcurrency" mapstructure:"totalConcurrency" validate:"required,gte=1"`
+	TargetQPS             float64 `yaml:"targetQPS" mapstructure:"targetQPS" validate:"required,gt=0"`
+	BurstMultiplier       float64 `yaml:"burstMultiplier" mapstructure:"burstMultiplier" validate:"omitempty,gt=0"`                    // Multiplier for rate limiter burst size (default: 2.0)
+	QPSMultiplier         float64 `yaml:"qpsMultiplier" mapstructure:"qpsMultiplier" validate:"omitempty,gt=0"`                        // Multiplier to apply to targetQPS for compensation (default: 1.0)
+	Limit                 int     `yaml:"limit" mapstructure:"limit" validate:"omitempty,gt=0"`                                        // Maximum number of results to return per query (default: 1000)
 	TraceFetchProbability float64 `yaml:"traceFetchProbability" mapstructure:"traceFetchProbability" validate:"omitempty,gte=0,lte=1"` // Probability of fetching full trace after search (default: 0.5)
+	Seed                  int64   `yaml:"seed" mapstructure:"seed" validate:"omitempty"`                                               // Seed for deterministic random number generation (default: 0)
+	BypassCache           bool    `yaml:"bypassCache" mapstructure:"bypassCache"`                                                      // Force cache bypass (default: false)
+	TimeWindowJitter      string  `yaml:"timeWindowJitter" mapstructure:"timeWindowJitter"`                                            // Random shift for time windows (e.g. "5m", default: "0s")
 }
 
 // TimeBucketConfig represents a time bucket configuration from YAML
@@ -29,6 +32,7 @@ type TimeBucketConfig struct {
 	Name     string `yaml:"name" mapstructure:"name" validate:"required"`
 	AgeStart string `yaml:"ageStart" mapstructure:"ageStart" validate:"required"`
 	AgeEnd   string `yaml:"ageEnd" mapstructure:"ageEnd" validate:"required"`
+	Weight   int    `yaml:"weight" mapstructure:"weight" validate:"omitempty,gte=1"` // Weight for weighted random selection (default: 1)
 }
 
 // QueryDefinition represents a single query definition
@@ -53,5 +57,5 @@ type TimeBucket struct {
 	Name     string        // bucket name (e.g., "ingester", "backend-1h")
 	AgeStart time.Duration // how far back to end the query window
 	AgeEnd   time.Duration // how far back to start the query window
+	Weight   int           // weight for weighted random selection
 }
-

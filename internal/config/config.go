@@ -29,6 +29,12 @@ func SetDefaults(cfg *Config) {
 	if cfg.Query.Limit <= 0 {
 		cfg.Query.Limit = 1000
 	}
+	// Set default weights for time buckets if not specified
+	for i := range cfg.TimeBuckets {
+		if cfg.TimeBuckets[i].Weight <= 0 {
+			cfg.TimeBuckets[i].Weight = 1
+		}
+	}
 }
 
 // LoadAndValidate loads configuration from YAML file and validates it
@@ -84,6 +90,13 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("invalid query delay duration: %w", err)
 	}
 
+	// Validate time window jitter duration
+	if cfg.Query.TimeWindowJitter != "" {
+		if _, err := time.ParseDuration(cfg.Query.TimeWindowJitter); err != nil {
+			return fmt.Errorf("invalid time window jitter duration: %w", err)
+		}
+	}
+
 	// Validate time bucket durations
 	for _, bucket := range cfg.TimeBuckets {
 		if _, err := time.ParseDuration(bucket.AgeStart); err != nil {
@@ -91,6 +104,10 @@ func validateConfig(cfg *Config) error {
 		}
 		if _, err := time.ParseDuration(bucket.AgeEnd); err != nil {
 			return fmt.Errorf("invalid ageEnd duration in bucket %s: %w", bucket.Name, err)
+		}
+		// Set default weight if not specified
+		if bucket.Weight <= 0 {
+			// This will be handled in SetDefaults, but we validate here too
 		}
 	}
 
@@ -160,10 +177,16 @@ func ConvertTimeBuckets(configBuckets []TimeBucketConfig) ([]TimeBucket, error) 
 			return nil, fmt.Errorf("invalid ageEnd duration in bucket %s: %v", cb.Name, err)
 		}
 
+		weight := cb.Weight
+		if weight <= 0 {
+			weight = 1 // Default weight
+		}
+
 		buckets = append(buckets, TimeBucket{
 			Name:     cb.Name,
 			AgeStart: ageStart,
 			AgeEnd:   ageEnd,
+			Weight:   weight,
 		})
 	}
 

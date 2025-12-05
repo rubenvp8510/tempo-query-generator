@@ -6,7 +6,6 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -22,14 +21,16 @@ type Worker struct {
 	tempoClient           *client.TempoClient
 	limiter               *rate.Limiter
 	queries               map[string]config.QueryDefinition
-	timeBuckets           []config.TimeBucket
 	executionPlan         []config.PlanEntry
+	timeBuckets           []config.TimeBucket
+	bucketWeightMap       map[string]int // Map bucket names to weights for quick lookup
 	metrics               *metrics.Metrics
 	limit                 int
 	testStartTime         time.Time
 	ctx                   context.Context
-	planIndex             int64   // Per-worker counter for cycling through execution plan
-	traceFetchProbability float64 // Probability of fetching full trace after search
+	rng                   *rand.Rand    // Deterministic random number generator
+	traceFetchProbability float64       // Probability of fetching full trace after search
+	jitter                time.Duration // Maximum jitter to apply to time windows
 }
 
 // bucketResolution holds the resolved bucket information
@@ -40,10 +41,13 @@ type bucketResolution struct {
 	endTime    *time.Time
 }
 
-// Run executes the worker's main loop, cycling through all execution plan entries
+// Run executes the worker's main loop, selecting from execution plan using weighted random selection
 func (w *Worker) Run(initialDelay time.Duration) {
-	// Initial delay to spread workers
-	time.Sleep(initialDelay)
+	// Initial delay to spread workers (use deterministic delay based on RNG)
+	if initialDelay > 0 {
+		delay := time.Duration(w.rng.Int63n(int64(initialDelay)))
+		time.Sleep(delay)
+	}
 
 	for {
 		// Wait for rate limiter permission (blocks until allowed)
@@ -52,21 +56,27 @@ func (w *Worker) Run(initialDelay time.Duration) {
 			return
 		}
 
-		// Get next plan entry
-		entry := w.getNextPlanEntry()
+		// Mark worker as active
+		w.metrics.ActiveWorkersGauge.Inc()
+
+		// Select plan entry using weighted random selection
+		entry := w.selectWeightedPlanEntry()
 		if entry == nil {
+			w.metrics.ActiveWorkersGauge.Dec()
 			continue
 		}
 
 		// Resolve query definition and bucket
 		queryDef, bucketRes := w.resolveQueryAndBucket(entry)
 		if queryDef == nil {
+			w.metrics.ActiveWorkersGauge.Dec()
 			continue
 		}
 
 		// Execute search query
 		searchResp, res, queryDuration, spansCount := w.executeSearch(queryDef, bucketRes, entry.QueryName)
 		if searchResp == nil {
+			w.metrics.ActiveWorkersGauge.Dec()
 			continue
 		}
 
@@ -75,14 +85,84 @@ func (w *Worker) Run(initialDelay time.Duration) {
 
 		// Log query completion
 		w.logQueryCompletion(entry.QueryName, bucketRes, queryDuration, res.StatusCode, spansCount)
+
+		// Mark worker as idle
+		w.metrics.ActiveWorkersGauge.Dec()
 	}
 }
 
-// getNextPlanEntry gets the next plan entry using per-worker counter for deterministic cycling
-func (w *Worker) getNextPlanEntry() *config.PlanEntry {
-	idx := atomic.AddInt64(&w.planIndex, 1) - 1
-	entryIdx := int(idx) % len(w.executionPlan)
-	return &w.executionPlan[entryIdx]
+// selectWeightedPlanEntry selects a plan entry using weighted random selection based on bucket weights
+func (w *Worker) selectWeightedPlanEntry() *config.PlanEntry {
+	if len(w.executionPlan) == 0 {
+		return nil
+	}
+
+	// Filter eligible plan entries (those whose buckets have elapsed enough time)
+	eligibleEntries := make([]config.PlanEntry, 0)
+	elapsed := time.Since(w.testStartTime)
+
+	for _, entry := range w.executionPlan {
+		// Find the bucket for this entry
+		var bucket *config.TimeBucket
+		for i := range w.timeBuckets {
+			if w.timeBuckets[i].Name == entry.BucketName {
+				bucket = &w.timeBuckets[i]
+				break
+			}
+		}
+
+		// If bucket not found or not eligible yet, skip this entry
+		if bucket == nil {
+			continue
+		}
+
+		// Check if bucket is eligible (has elapsed enough time)
+		if bucket.AgeEnd <= elapsed {
+			eligibleEntries = append(eligibleEntries, entry)
+		}
+	}
+
+	// If no entries are eligible, return first entry (will use immediate bucket in resolveQueryAndBucket)
+	if len(eligibleEntries) == 0 {
+		if len(w.executionPlan) > 0 {
+			// Return first entry but it will use immediate bucket
+			return &w.executionPlan[0]
+		}
+		return nil
+	}
+
+	// Calculate total weight of eligible entries
+	totalWeight := 0
+	for _, entry := range eligibleEntries {
+		weight := w.bucketWeightMap[entry.BucketName]
+		if weight <= 0 {
+			weight = 1 // Default weight if not found
+		}
+		totalWeight += weight
+	}
+
+	if totalWeight == 0 {
+		// All weights are 0, select uniformly
+		selectedIdx := w.rng.Intn(len(eligibleEntries))
+		return &eligibleEntries[selectedIdx]
+	}
+
+	// Weighted random selection
+	randValue := w.rng.Intn(totalWeight)
+	currentWeight := 0
+	for _, entry := range eligibleEntries {
+		weight := w.bucketWeightMap[entry.BucketName]
+		if weight <= 0 {
+			weight = 1 // Default weight if not found
+		}
+		currentWeight += weight
+		if randValue < currentWeight {
+			return &entry
+		}
+	}
+
+	// Fallback to last eligible entry (shouldn't happen)
+	return &eligibleEntries[len(eligibleEntries)-1]
 }
 
 // resolveQueryAndBucket resolves the query definition and bucket from the plan entry
@@ -132,11 +212,21 @@ func (w *Worker) resolveBucket(bucketName string) *bucketResolution {
 		return res
 	}
 
-	// Calculate time range dynamically without jitter for stable query windows
+	// Calculate time range with jitter to defeat caching
 	now := time.Now()
-	// Use fixed bucket boundaries for consistent results
-	endTime := now.Add(-bucket.AgeStart)
-	startTime := now.Add(-bucket.AgeEnd)
+
+	// Apply random jitter if configured (shifts the entire window to randomize cache keys)
+	var shift time.Duration
+	if w.jitter > 0 {
+		// Generate random float between -1.0 and 1.0
+		randomFactor := (w.rng.Float64() * 2) - 1
+		// Apply the same shift to both start and end to preserve the window duration
+		// but randomize the absolute position
+		shift = time.Duration(randomFactor * float64(w.jitter))
+	}
+
+	endTime := now.Add(-bucket.AgeStart).Add(shift)
+	startTime := now.Add(-bucket.AgeEnd).Add(shift)
 
 	res.bucket = bucket
 	res.bucketName = bucketName
@@ -150,7 +240,7 @@ func (w *Worker) resolveBucket(bucketName string) *bucketResolution {
 func (w *Worker) executeSearch(queryDef *config.QueryDefinition, bucketRes *bucketResolution, queryName string) (*client.TempoSearchResponse, *http.Response, float64, int) {
 	// Perform Tempo search using client
 	start := time.Now()
-	searchResp, res, err := w.tempoClient.Search(w.ctx, queryDef.TraceQL, bucketRes.startTime, bucketRes.endTime, w.limit)
+	searchResp, res, bodySize, err := w.tempoClient.Search(w.ctx, queryDef.TraceQL, bucketRes.startTime, bucketRes.endTime, w.limit)
 
 	queryDuration := time.Since(start).Seconds()
 
@@ -177,6 +267,9 @@ func (w *Worker) executeSearch(queryDef *config.QueryDefinition, bucketRes *buck
 	// Always record spans returned metric (0 if parsing failed, actual count otherwise)
 	w.metrics.SpansReturnedHist.WithLabelValues(queryName).Observe(float64(spansCount))
 
+	// Record response size
+	w.metrics.ResponseSizeBytesHist.WithLabelValues("search", queryName).Observe(float64(bodySize))
+
 	return searchResp, res, queryDuration, spansCount
 }
 
@@ -186,8 +279,8 @@ func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName stri
 		return
 	}
 
-	// Generate random number to determine if we should fetch the trace
-	if rand.Float64() >= w.traceFetchProbability {
+	// Generate random number to determine if we should fetch the trace (using worker's deterministic RNG)
+	if w.rng.Float64() >= w.traceFetchProbability {
 		return
 	}
 
@@ -199,7 +292,7 @@ func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName stri
 
 	// Fetch the full trace
 	fetchStart := time.Now()
-	fetchRes, err := w.tempoClient.GetTrace(w.ctx, traceID)
+	fetchRes, bodySize, err := w.tempoClient.GetTrace(w.ctx, traceID)
 	fetchDuration := time.Since(fetchStart).Seconds()
 	w.metrics.TraceFetchLatencyHist.WithLabelValues(queryName).Observe(fetchDuration)
 
@@ -214,6 +307,9 @@ func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName stri
 		slog.Error("trace fetch failed", "worker_id", w.workerID, "query", queryName, "trace_id", traceID, "status_code", fetchRes.StatusCode)
 		return
 	}
+
+	// Record response size
+	w.metrics.ResponseSizeBytesHist.WithLabelValues("trace", queryName).Observe(float64(bodySize))
 
 	slog.Debug("trace fetched", "worker_id", w.workerID, "query", queryName, "trace_id", traceID, "duration_seconds", fetchDuration)
 }

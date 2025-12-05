@@ -30,6 +30,12 @@ type Metrics struct {
 
 	// Trace fetch failures counter
 	TraceFetchFailuresCounter *prometheus.CounterVec
+
+	// Response size histogram with type and query name labels
+	ResponseSizeBytesHist *prometheus.HistogramVec
+
+	// Active workers gauge
+	ActiveWorkersGauge prometheus.Gauge
 }
 
 // NewMetrics initializes all Prometheus metrics once at startup
@@ -92,16 +98,34 @@ func NewMetrics(namespace string) *Metrics {
 		Help:      "Total trace fetch failures",
 	}, []string{"query_name", "status_code"})
 
+	// Response size histogram with type and query name labels
+	responseSizeBytesHist := promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "query_load_test",
+		Subsystem: "response",
+		Name:      "size_bytes",
+		Help:      "Size of response in bytes",
+		Buckets:   prometheus.ExponentialBuckets(1024, 2, 16), // Start at 1KB, up to ~64MB
+	}, []string{"type", "query_name"})
+
+	// Active workers gauge
+	activeWorkersGauge := promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "query_load_test",
+		Subsystem: "workers",
+		Name:      "active",
+		Help:      "Number of workers currently executing a query",
+	})
+
 	slog.Info("metrics initialized", "namespace", namespace, "sanitized_namespace", sanitizedNs)
 
 	return &Metrics{
-		QueryLatencyHist:         queryLatencyHist,
-		QueryFailuresCounter:     queryFailuresCounter,
-		BucketQueryCounter:       bucketQueryCounter,
-		BucketDurationHist:       bucketDurationHist,
-		SpansReturnedHist:        spansReturnedHist,
-		TraceFetchLatencyHist:    traceFetchLatencyHist,
+		QueryLatencyHist:          queryLatencyHist,
+		QueryFailuresCounter:      queryFailuresCounter,
+		BucketQueryCounter:        bucketQueryCounter,
+		BucketDurationHist:        bucketDurationHist,
+		SpansReturnedHist:         spansReturnedHist,
+		TraceFetchLatencyHist:     traceFetchLatencyHist,
 		TraceFetchFailuresCounter: traceFetchFailuresCounter,
+		ResponseSizeBytesHist:     responseSizeBytesHist,
+		ActiveWorkersGauge:        activeWorkersGauge,
 	}
 }
-

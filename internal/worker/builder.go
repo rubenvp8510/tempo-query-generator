@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"math/rand"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -13,17 +14,18 @@ import (
 
 // WorkerBuilder builds Worker instances using the builder pattern
 type WorkerBuilder struct {
-	workerID         int
-	tempoClient      *client.TempoClient
-	limiter          *rate.Limiter
-	queries          map[string]config.QueryDefinition
-	timeBuckets      []config.TimeBucket
-	executionPlan     []config.PlanEntry
-	metrics          *metrics.Metrics
-	limit            int
-	testStartTime    time.Time
-	initialPlanIndex     int64
+	workerID              int
+	tempoClient           *client.TempoClient
+	limiter               *rate.Limiter
+	queries               map[string]config.QueryDefinition
+	executionPlan         []config.PlanEntry
+	timeBuckets           []config.TimeBucket
+	metrics               *metrics.Metrics
+	limit                 int
+	testStartTime         time.Time
+	seed                  int64
 	traceFetchProbability float64
+	jitter                time.Duration
 }
 
 // NewWorkerBuilder creates a new WorkerBuilder instance
@@ -85,9 +87,9 @@ func (b *WorkerBuilder) WithTestStartTime(testStartTime time.Time) *WorkerBuilde
 	return b
 }
 
-// WithInitialPlanIndex sets the initial plan index for staggered start positions
-func (b *WorkerBuilder) WithInitialPlanIndex(initialPlanIndex int64) *WorkerBuilder {
-	b.initialPlanIndex = initialPlanIndex
+// WithSeed sets the base seed for deterministic random number generation
+func (b *WorkerBuilder) WithSeed(seed int64) *WorkerBuilder {
+	b.seed = seed
 	return b
 }
 
@@ -97,21 +99,42 @@ func (b *WorkerBuilder) WithTraceFetchProbability(traceFetchProbability float64)
 	return b
 }
 
-// Build creates a Worker instance from the builder
-func (b *WorkerBuilder) Build() *Worker {
-	return &Worker{
-		workerID:         b.workerID,
-		tempoClient:      b.tempoClient,
-		limiter:          b.limiter,
-		queries:          b.queries,
-		timeBuckets:      b.timeBuckets,
-		executionPlan:    b.executionPlan,
-		metrics:          b.metrics,
-		limit:            b.limit,
-		testStartTime:    b.testStartTime,
-		ctx:                  context.Background(),
-		planIndex:            b.initialPlanIndex, // Initialize with staggered offset
-		traceFetchProbability: b.traceFetchProbability,
-	}
+// WithJitter sets the maximum jitter duration to apply to time windows
+func (b *WorkerBuilder) WithJitter(jitter time.Duration) *WorkerBuilder {
+	b.jitter = jitter
+	return b
 }
 
+// Build creates a Worker instance from the builder
+func (b *WorkerBuilder) Build() *Worker {
+	// Initialize deterministic RNG with seed + workerID (ensures each worker has unique but deterministic sequence)
+	workerSeed := b.seed + int64(b.workerID)
+	rng := rand.New(rand.NewSource(workerSeed))
+
+	// Create bucket weight map for quick lookup during weighted selection
+	bucketWeightMap := make(map[string]int)
+	for _, bucket := range b.timeBuckets {
+		weight := bucket.Weight
+		if weight <= 0 {
+			weight = 1 // Default weight
+		}
+		bucketWeightMap[bucket.Name] = weight
+	}
+
+	return &Worker{
+		workerID:              b.workerID,
+		tempoClient:           b.tempoClient,
+		limiter:               b.limiter,
+		queries:               b.queries,
+		executionPlan:         b.executionPlan,
+		timeBuckets:           b.timeBuckets,
+		bucketWeightMap:       bucketWeightMap,
+		metrics:               b.metrics,
+		limit:                 b.limit,
+		testStartTime:         b.testStartTime,
+		ctx:                   context.Background(),
+		rng:                   rng,
+		traceFetchProbability: b.traceFetchProbability,
+		jitter:                b.jitter,
+	}
+}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"math/rand"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -33,8 +32,11 @@ type Executor struct {
 	burstMultiplier       float64
 	limit                 int
 	executionPlan         []config.PlanEntry
+	seed                  int64
 	metrics               *metrics.Metrics
 	traceFetchProbability float64
+	bypassCache           bool
+	jitter                time.Duration
 }
 
 // createTempoClient creates a Tempo client with token fallback logic
@@ -64,8 +66,11 @@ func NewExecutor(
 	targetQPS, burstMultiplier float64,
 	limit int,
 	executionPlan []config.PlanEntry,
+	seed int64,
 	metrics *metrics.Metrics,
 	traceFetchProbability float64,
+	bypassCache bool,
+	jitter time.Duration,
 ) *Executor {
 	return &Executor{
 		queries:               queries,
@@ -79,8 +84,11 @@ func NewExecutor(
 		burstMultiplier:       burstMultiplier,
 		limit:                 limit,
 		executionPlan:         executionPlan,
+		seed:                  seed,
 		metrics:               metrics,
 		traceFetchProbability: traceFetchProbability,
+		bypassCache:           bypassCache,
+		jitter:                jitter,
 	}
 }
 
@@ -90,6 +98,12 @@ func (e *Executor) Run() error {
 	tempoClient, err := createTempoClient(e.queryEndpoint, e.tenantID, kubernetesServiceAccountTokenPath)
 	if err != nil {
 		return err
+	}
+
+	// Configure cache bypass if enabled
+	if e.bypassCache {
+		tempoClient.SetBypassCache(true)
+		slog.Info("cache bypass enabled", "note", "Cache-Control headers will be sent with requests")
 	}
 
 	// Calculate per-worker QPS for fair distribution
@@ -103,16 +117,10 @@ func (e *Executor) Run() error {
 	burstSize := int(math.Max(10, perWorkerQPS*e.burstMultiplier))
 	slog.Info("rate limiter configured", "per_worker_qps", perWorkerQPS, "burst", burstSize, "multiplier", e.burstMultiplier)
 
-	// Launch N independent workers for concurrent execution with staggered starting positions
-	planLength := int64(len(e.executionPlan))
+	// Launch N independent workers for concurrent execution
+	// Each worker uses seed + workerID for deterministic but unique RNG sequences
 	for i := 0; i < e.concurrency; i++ {
 		workerID := i + 1
-		// Each worker starts with a small random initial delay to spread the load
-		initialDelay := time.Duration(rand.Int63n(int64(time.Second)))
-
-		// Calculate staggered starting position in execution plan for better distribution
-		// This ensures workers don't all start at the same position, reducing cache effects
-		initialPlanIndex := (int64(i) * planLength) / int64(e.concurrency)
 
 		// Create per-worker rate limiter for fair distribution
 		limiter := rate.NewLimiter(rate.Limit(perWorkerQPS), burstSize)
@@ -123,17 +131,19 @@ func (e *Executor) Run() error {
 			WithTempoClient(tempoClient).
 			WithLimiter(limiter).
 			WithQueries(e.queries).
-			WithTimeBuckets(e.timeBuckets).
 			WithExecutionPlan(e.executionPlan).
+			WithTimeBuckets(e.timeBuckets).
 			WithMetrics(e.metrics).
 			WithLimit(e.limit).
 			WithTestStartTime(testStartTime).
-			WithInitialPlanIndex(initialPlanIndex).
+			WithSeed(e.seed).
 			WithTraceFetchProbability(e.traceFetchProbability).
+			WithJitter(e.jitter).
 			Build()
 
-		slog.Debug("worker starting position", "worker_id", workerID, "initial_plan_index", initialPlanIndex)
-		go w.Run(initialDelay)
+		slog.Debug("worker created", "worker_id", workerID, "seed", e.seed)
+		// Initial delay is handled deterministically inside the worker
+		go w.Run(e.delay)
 	}
 
 	return nil
