@@ -2,7 +2,7 @@ package generator
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"math/rand"
 	"sync"
@@ -59,14 +59,14 @@ func createTempoClient(queryEndpoint, tenantID, tokenPath string) (*client.Tempo
 	// Try creating client with token first
 	tempoClient, err := client.NewTempoClient(queryEndpoint, tenantID, tokenPath)
 	if err != nil {
-		log.Printf("Warning: Failed to create Tempo client: %v", err)
+		slog.Warn("failed to create Tempo client", "error", err)
 		// Try creating client without token
 		tempoClient, err = client.NewTempoClient(queryEndpoint, tenantID, "")
 		if err != nil {
 			return nil, fmt.Errorf("failed to create Tempo client: %w", err)
 		}
 	} else {
-		log.Printf("ServiceAccount Token loaded")
+		slog.Info("service account token loaded")
 	}
 	return tempoClient, nil
 }
@@ -107,7 +107,7 @@ func (e *Executor) Run() error {
 		return err
 	}
 
-	log.Printf("Starting query executor for: %s (concurrency: %d, target QPS: %.4f)\n", e.name, e.concurrency, e.targetQPS)
+	slog.Info("starting query executor", "query", e.name, "concurrency", e.concurrency, "target_qps", e.targetQPS)
 
 	// Track when this executor started for time-aware bucket selection
 	testStartTime := time.Now()
@@ -117,7 +117,7 @@ func (e *Executor) Run() error {
 	// Calculate burst size: allow 1-2 seconds of burst capacity for better rate accuracy
 	burstSize := int(math.Max(10, e.targetQPS*e.burstMultiplier))
 	limiter := rate.NewLimiter(rate.Limit(e.targetQPS), burstSize)
-	log.Printf("Rate limiter for %s: QPS=%.4f, burst=%d (multiplier=%.2f)", e.name, e.targetQPS, burstSize, e.burstMultiplier)
+	slog.Info("rate limiter configured", "query", e.name, "qps", e.targetQPS, "burst", burstSize, "multiplier", e.burstMultiplier)
 
 	// Launch N independent workers for concurrent execution
 	for i := 0; i < e.concurrency; i++ {

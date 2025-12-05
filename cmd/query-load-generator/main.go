@@ -2,8 +2,9 @@ package main
 
 import (
 	"flag"
-	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -18,7 +19,8 @@ func main() {
 	// Load and validate configuration
 	cfg, err := config.LoadAndValidate()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		slog.Error("failed to load config", "error", err)
+		os.Exit(1)
 	}
 
 	// Initialize metrics with the configured namespace
@@ -27,38 +29,40 @@ func main() {
 	// Parse query delay (already validated in config package)
 	queryDelay, err := time.ParseDuration(cfg.Query.Delay)
 	if err != nil {
-		log.Fatalf("Could not parse query delay: %v", err)
+		slog.Error("could not parse query delay", "error", err)
+		os.Exit(1)
 	}
 
 	concurrentQueries := cfg.Query.ConcurrentQueries
-	log.Printf("Concurrent queries per executor: %d", concurrentQueries)
+	slog.Info("concurrent queries per executor", "count", concurrentQueries)
 
 	// Apply QPS multiplier if configured (for compensation)
 	targetQPS := cfg.Query.TargetQPS
 	if cfg.Query.QPSMultiplier != 1.0 {
 		targetQPS = targetQPS * cfg.Query.QPSMultiplier
-		log.Printf("Applied QPS multiplier: %.2f (adjusted target: %.2f)", cfg.Query.QPSMultiplier, targetQPS)
+		slog.Info("applied QPS multiplier", "multiplier", cfg.Query.QPSMultiplier, "adjusted_target", targetQPS)
 	} else {
-		log.Printf("Target total QPS: %.2f", targetQPS)
+		slog.Info("target total QPS", "qps", targetQPS)
 	}
 
-	log.Printf("Rate limiter burst multiplier: %.2f", cfg.Query.BurstMultiplier)
-	log.Printf("Query result limit: %d", cfg.Query.Limit)
+	slog.Info("rate limiter burst multiplier", "multiplier", cfg.Query.BurstMultiplier)
+	slog.Info("query result limit", "limit", cfg.Query.Limit)
 
 	// Convert time buckets (already validated in config package)
 	timeBuckets, err := config.ConvertTimeBuckets(cfg.TimeBuckets)
 	if err != nil {
-		log.Fatalf("Failed to parse time buckets: %v", err)
+		slog.Error("failed to parse time buckets", "error", err)
+		os.Exit(1)
 	}
-	log.Printf("Using time buckets: %+v", timeBuckets)
+	slog.Info("using time buckets", "buckets", timeBuckets)
 
-	log.Printf("Loaded %d queries from configuration", len(cfg.Queries))
+	slog.Info("loaded queries from configuration", "count", len(cfg.Queries))
 
 	// Calculate per-query QPS: total QPS divided by number of query types
 	perQueryQPS := targetQPS / float64(len(cfg.Queries))
-	log.Printf("Per-query QPS: %.4f (distributed across %d concurrent workers)", perQueryQPS, concurrentQueries)
+	slog.Info("per-query QPS", "qps", perQueryQPS, "concurrent_workers", concurrentQueries)
 
-	log.Printf("Loaded execution plan with %d entries from config", len(cfg.ExecutionPlan))
+	slog.Info("loaded execution plan from config", "entry_count", len(cfg.ExecutionPlan))
 
 	// Count entries per query for logging
 	queryDist := make(map[string]int)
@@ -66,9 +70,9 @@ func main() {
 		queryDist[entry.QueryName]++
 	}
 
-	log.Printf("Plan distribution across queries:")
+	slog.Info("plan distribution across queries")
 	for queryName, count := range queryDist {
-		log.Printf("  %s: %d entries (will cycle/repeat as needed)", queryName, count)
+		slog.Info("query plan entries", "query", queryName, "entry_count", count, "note", "will cycle/repeat as needed")
 	}
 
 	// Create and start query executors
@@ -89,7 +93,8 @@ func main() {
 			metrics,
 		)
 		if err := executor.Run(); err != nil {
-			log.Fatalf("Could not run query executor: %v", err)
+			slog.Error("could not run query executor", "error", err)
+			os.Exit(1)
 		}
 	}
 

@@ -1,7 +1,7 @@
 package generator
 
 import (
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -70,7 +70,7 @@ func NewMetrics(namespace string) *Metrics {
 		Buckets:   []float64{0, 10, 50, 100, 250, 500, 1000, 2500, 5000},
 	}, []string{"name"})
 
-	log.Printf("Metrics initialized for namespace: %s (sanitized: %s)", namespace, sanitizedNs)
+	slog.Info("metrics initialized", "namespace", namespace, "sanitized_namespace", sanitizedNs)
 
 	return &Metrics{
 		QueryLatencyHist:     queryLatencyHist,

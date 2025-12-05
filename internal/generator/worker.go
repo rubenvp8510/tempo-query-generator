@@ -2,7 +2,7 @@ package generator
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -194,7 +194,7 @@ func (w *Worker) Run(initialDelay time.Duration) {
 	for {
 		// Wait for rate limiter permission (blocks until allowed)
 		if err := w.limiter.Wait(w.ctx); err != nil {
-			log.Printf("[worker-%d] Rate limiter error: %v", w.workerID, err)
+			slog.Error("rate limiter error", "worker_id", w.workerID, "error", err)
 			return
 		}
 
@@ -212,8 +212,11 @@ func (w *Worker) Run(initialDelay time.Duration) {
 
 			// Log when we've cycled through all entries once
 			if idx > 0 && idx%int64(len(matchingEntries)) == 0 {
-				log.Printf("[worker-%d] Query '%s': Cycled through all %d plan entries, repeating from start (cycle: %d)",
-					w.workerID, w.name, len(matchingEntries), idx/int64(len(matchingEntries)))
+				slog.Info("cycled through all plan entries",
+					"worker_id", w.workerID,
+					"query", w.name,
+					"entry_count", len(matchingEntries),
+					"cycle", idx/int64(len(matchingEntries)))
 			}
 
 			bucketName = entry.BucketName
@@ -243,12 +246,12 @@ func (w *Worker) Run(initialDelay time.Duration) {
 				} else {
 					// Bucket not found, use immediate
 					bucketName = "immediate"
-					log.Printf("[worker-%d] Warning: Bucket '%s' not found in timeBuckets config, using immediate", w.workerID, bucketName)
+					slog.Warn("bucket not found in timeBuckets config, using immediate", "worker_id", w.workerID, "bucket", bucketName)
 				}
 			}
 		} else {
 			// No matching entries in plan for this query - this shouldn't happen if config is valid
-			log.Printf("[worker-%d] Warning: No plan entries for query '%s', using immediate bucket", w.workerID, w.name)
+			slog.Warn("no plan entries for query, using immediate bucket", "worker_id", w.workerID, "query", w.name)
 		}
 
 		// Prepare time range parameters for client
@@ -269,14 +272,14 @@ func (w *Worker) Run(initialDelay time.Duration) {
 		w.metrics.BucketQueryCounter.WithLabelValues(bucketName, queryName).Inc()
 
 		if err != nil {
-			log.Printf("[worker-%d] error making search request: %v", w.workerID, err)
+			slog.Error("error making search request", "worker_id", w.workerID, "error", err)
 			w.metrics.QueryFailuresCounter.WithLabelValues(queryName, "0").Inc()
 			continue
 		}
 
 		if res.StatusCode >= 300 {
 			w.metrics.QueryFailuresCounter.WithLabelValues(queryName, strconv.Itoa(res.StatusCode)).Inc()
-			log.Printf("[worker-%d] Query failed [%s]: status: %d", w.workerID, bucketName, res.StatusCode)
+			slog.Error("query failed", "worker_id", w.workerID, "bucket", bucketName, "status_code", res.StatusCode)
 			continue
 		}
 
@@ -288,12 +291,24 @@ func (w *Worker) Run(initialDelay time.Duration) {
 
 		// Format log message with or without time range
 		if bucket != nil {
-			log.Printf("[worker-%d] [%s] %s took %.3f seconds --> status: %d, spans: %d, timeRange: %s to %s\n",
-				w.workerID, bucketName, w.name, queryDuration, res.StatusCode, spansCount,
-				startTime.Format("15:04:05"), endTime.Format("15:04:05"))
+			slog.Info("query completed",
+				"worker_id", w.workerID,
+				"bucket", bucketName,
+				"query", w.name,
+				"duration_seconds", queryDuration,
+				"status_code", res.StatusCode,
+				"spans", spansCount,
+				"start_time", startTime.Format("15:04:05"),
+				"end_time", endTime.Format("15:04:05"))
 		} else {
-			log.Printf("[worker-%d] [%s] %s took %.3f seconds --> status: %d, spans: %d (immediate data, no time range)\n",
-				w.workerID, bucketName, w.name, queryDuration, res.StatusCode, spansCount)
+			slog.Info("query completed",
+				"worker_id", w.workerID,
+				"bucket", bucketName,
+				"query", w.name,
+				"duration_seconds", queryDuration,
+				"status_code", res.StatusCode,
+				"spans", spansCount,
+				"note", "immediate data, no time range")
 		}
 		// Rate limiter will control the next iteration
 	}
