@@ -1,4 +1,4 @@
-package generator
+package metrics
 
 import (
 	"log/slog"

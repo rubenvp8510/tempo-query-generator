@@ -48,8 +48,8 @@ The tool uses a time bucket system to distribute queries across different time r
 The tool simulates realistic user behavior by implementing a search-and-fetch pattern:
 
 - **Search Phase**: Workers execute TraceQL search queries to find traces matching specific criteria.
-- **Fetch Phase**: After a successful search, workers probabilistically fetch the full trace details by trace ID, simulating a user clicking on a search result.
-- **Click Probability**: Configurable probability (0.0-1.0) determines how often full traces are fetched after searches. A value of 0.5 means 50% of successful searches will trigger a trace fetch.
+- **Fetch Phase**: After a successful search, workers probabilistically fetch the full trace details by trace ID, simulating a user viewing detailed trace information.
+- **Trace Fetch Probability**: Configurable probability (0.0-1.0) determines how often full traces are fetched after searches. A value of 0.5 means 50% of successful searches will trigger a trace fetch.
 - **Realistic Load**: This two-phase approach exercises both Tempo's search index and trace retrieval mechanisms, providing a more representative performance test.
 
 ### Metrics Collection
@@ -84,7 +84,7 @@ query:
   burstMultiplier: 2.0            # Rate limiter burst multiplier (per-worker burst = perWorkerQPS * burstMultiplier)
   qpsMultiplier: 1.0             # Optional QPS compensation multiplier
   limit: 1000                     # Maximum results per query
-  clickProbability: 0.5          # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
+  traceFetchProbability: 0.5     # Probability of fetching full trace after search (0.0-1.0, default: 0.5)
 
 timeBuckets:
   - name: "recent"
@@ -191,7 +191,7 @@ The capacity calculator:
 
 The tool considers the effective latency which includes:
 - Search query latency
-- Trace fetch latency (weighted by `clickProbability`)
+- Trace fetch latency (weighted by `traceFetchProbability`)
 - Processing overhead
 
 #### Running the Capacity Calculator
@@ -380,7 +380,7 @@ A utility tool that:
    - Determines time bucket and calculates time range
    - Executes search query via Tempo client
    - Records metrics (latency, spans, failures)
-   - **Search-and-Fetch**: If search succeeds and `clickProbability` threshold is met:
+   - **Search-and-Fetch**: If search succeeds and `traceFetchProbability` threshold is met:
      - Extracts trace ID from first search result
      - Fetches full trace details via `GetTrace()` API
      - Records trace fetch metrics (latency, failures)

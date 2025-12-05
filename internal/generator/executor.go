@@ -11,6 +11,8 @@ import (
 
 	"github.com/rubenvp8510/tempo-query-generator/internal/client"
 	"github.com/rubenvp8510/tempo-query-generator/internal/config"
+	"github.com/rubenvp8510/tempo-query-generator/internal/metrics"
+	"github.com/rubenvp8510/tempo-query-generator/internal/worker"
 )
 
 const (
@@ -20,19 +22,19 @@ const (
 
 // Executor handles query execution with rate limiting and concurrency
 type Executor struct {
-	queries          map[string]config.QueryDefinition
-	namespace        string
-	queryEndpoint    string
-	delay            time.Duration
-	timeBuckets      []config.TimeBucket
-	concurrency      int
-	tenantID         string
-	targetQPS        float64
-	burstMultiplier  float64
-	limit            int
-	executionPlan    []config.PlanEntry
-	metrics          *Metrics
-	clickProbability float64
+	queries               map[string]config.QueryDefinition
+	namespace             string
+	queryEndpoint         string
+	delay                 time.Duration
+	timeBuckets           []config.TimeBucket
+	concurrency           int
+	tenantID              string
+	targetQPS             float64
+	burstMultiplier       float64
+	limit                 int
+	executionPlan         []config.PlanEntry
+	metrics               *metrics.Metrics
+	traceFetchProbability float64
 }
 
 // createTempoClient creates a Tempo client with token fallback logic
@@ -62,23 +64,23 @@ func NewExecutor(
 	targetQPS, burstMultiplier float64,
 	limit int,
 	executionPlan []config.PlanEntry,
-	metrics *Metrics,
-	clickProbability float64,
+	metrics *metrics.Metrics,
+	traceFetchProbability float64,
 ) *Executor {
 	return &Executor{
-		queries:          queries,
-		namespace:        namespace,
-		queryEndpoint:    queryEndpoint,
-		delay:            delay,
-		timeBuckets:      timeBuckets,
-		concurrency:      concurrency,
-		tenantID:         tenantID,
-		targetQPS:        targetQPS,
-		burstMultiplier:  burstMultiplier,
-		limit:            limit,
-		executionPlan:    executionPlan,
-		metrics:          metrics,
-		clickProbability: clickProbability,
+		queries:               queries,
+		namespace:             namespace,
+		queryEndpoint:         queryEndpoint,
+		delay:                 delay,
+		timeBuckets:           timeBuckets,
+		concurrency:           concurrency,
+		tenantID:              tenantID,
+		targetQPS:             targetQPS,
+		burstMultiplier:       burstMultiplier,
+		limit:                 limit,
+		executionPlan:         executionPlan,
+		metrics:               metrics,
+		traceFetchProbability: traceFetchProbability,
 	}
 }
 
@@ -116,7 +118,7 @@ func (e *Executor) Run() error {
 		limiter := rate.NewLimiter(rate.Limit(perWorkerQPS), burstSize)
 
 		// Create and start worker using builder pattern
-		worker := NewWorkerBuilder().
+		w := worker.NewWorkerBuilder().
 			WithWorkerID(workerID).
 			WithTempoClient(tempoClient).
 			WithLimiter(limiter).
@@ -127,11 +129,11 @@ func (e *Executor) Run() error {
 			WithLimit(e.limit).
 			WithTestStartTime(testStartTime).
 			WithInitialPlanIndex(initialPlanIndex).
-			WithClickProbability(e.clickProbability).
+			WithTraceFetchProbability(e.traceFetchProbability).
 			Build()
 
 		slog.Debug("worker starting position", "worker_id", workerID, "initial_plan_index", initialPlanIndex)
-		go worker.Run(initialDelay)
+		go w.Run(initialDelay)
 	}
 
 	return nil

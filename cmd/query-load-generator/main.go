@@ -11,6 +11,7 @@ import (
 
 	"github.com/rubenvp8510/tempo-query-generator/internal/config"
 	"github.com/rubenvp8510/tempo-query-generator/internal/generator"
+	"github.com/rubenvp8510/tempo-query-generator/internal/metrics"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 	}
 
 	// Initialize metrics with the configured namespace
-	metrics := generator.NewMetrics(cfg.Namespace)
+	m := metrics.NewMetrics(cfg.Namespace)
 
 	// Parse query delay (already validated in config package)
 	queryDelay, err := time.ParseDuration(cfg.Query.Delay)
@@ -52,12 +53,12 @@ func main() {
 	slog.Info("rate limiter burst multiplier", "multiplier", cfg.Query.BurstMultiplier)
 	slog.Info("query result limit", "limit", cfg.Query.Limit)
 
-	// Set default click probability if not configured
-	clickProbability := cfg.Query.ClickProbability
-	if clickProbability == 0.0 {
-		clickProbability = 0.5 // Default: 50% of searches will fetch full trace
+	// Set default trace fetch probability if not configured
+	traceFetchProbability := cfg.Query.TraceFetchProbability
+	if traceFetchProbability == 0.0 {
+		traceFetchProbability = 0.5 // Default: 50% of searches will fetch full trace
 	}
-	slog.Info("trace fetch click probability", "probability", clickProbability)
+	slog.Info("trace fetch probability", "probability", traceFetchProbability)
 
 	// Convert time buckets (already validated in config package)
 	timeBuckets, err := config.ConvertTimeBuckets(cfg.TimeBuckets)
@@ -101,8 +102,8 @@ func main() {
 		cfg.Query.BurstMultiplier,
 		cfg.Query.Limit,
 		cfg.ExecutionPlan,
-		metrics,
-		clickProbability,
+		m,
+		traceFetchProbability,
 	)
 	if err := executor.Run(); err != nil {
 		slog.Error("could not run query executor", "error", err)

@@ -164,7 +164,6 @@ func ConvertTimeBuckets(configBuckets []TimeBucketConfig) ([]TimeBucket, error) 
 			Name:     cb.Name,
 			AgeStart: ageStart,
 			AgeEnd:   ageEnd,
-			Weight:   cb.Weight,
 		})
 	}
 

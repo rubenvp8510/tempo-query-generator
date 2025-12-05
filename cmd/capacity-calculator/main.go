@@ -26,15 +26,15 @@ func main() {
 	// Get Concurrency
 	concurrency := cfg.Query.TotalConcurrency
 
-	// Get Click Probability (using default logic from main app)
-	clickProb := cfg.Query.ClickProbability
-	if clickProb == 0.0 {
-		clickProb = 0.5 // Default to 50% if not specified
+	// Get Trace Fetch Probability (using default logic from main app)
+	traceFetchProb := cfg.Query.TraceFetchProbability
+	if traceFetchProb == 0.0 {
+		traceFetchProb = 0.5 // Default to 50% if not specified
 	}
 
 	// Log Configuration Summary
 	slog.Info("capacity configuration analysis")
-	slog.Info("configuration summary", "total_concurrency", concurrency, "target_qps", targetQPS, "click_probability", clickProb)
+	slog.Info("configuration summary", "total_concurrency", concurrency, "target_qps", targetQPS, "trace_fetch_probability", traceFetchProb)
 
 	if targetQPS <= 0 {
 		slog.Error("target QPS must be positive", "target_qps", targetQPS)
@@ -48,7 +48,7 @@ func main() {
 	maxLatency := time.Duration(maxLatencySeconds * float64(time.Second))
 
 	slog.Info("required performance", "target_qps", targetQPS, "concurrency", concurrency, "max_allowable_latency", maxLatency, "max_allowable_latency_ms", maxLatency.Milliseconds())
-	slog.Info("note: iteration latency includes search latency plus click probability times trace fetch latency plus processing overhead")
+	slog.Info("note: iteration latency includes search latency plus trace fetch probability times trace fetch latency plus processing overhead")
 
 	// Scenario Analysis
 	slog.Info("scenario analysis: checking if configuration can sustain target QPS under various latency conditions")
@@ -69,7 +69,7 @@ func main() {
 
 	for _, s := range scenarios {
 		// Effective Latency = Search + (Prob * Fetch)
-		effSeconds := s.search.Seconds() + (clickProb * s.fetch.Seconds())
+		effSeconds := s.search.Seconds() + (traceFetchProb * s.fetch.Seconds())
 		effDuration := time.Duration(effSeconds * float64(time.Second))
 
 		// Max QPS this latency allows
