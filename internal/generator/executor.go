@@ -69,6 +69,7 @@ type Executor struct {
 	limiterMutex            sync.RWMutex
 	currentTargetQPS        float64
 	targetQPSMutex          sync.RWMutex
+	done                    chan struct{} // Closed when graceful shutdown completes
 }
 
 // createTempoClient creates a Tempo client with token fallback logic
@@ -131,6 +132,7 @@ func NewExecutor(
 		ctx:                     ctx,
 		cancel:                  cancel,
 		workerLimiters:          make([]*dynamicLimiter, 0, concurrency),
+		done:                    make(chan struct{}),
 	}
 }
 
@@ -215,6 +217,12 @@ func (e *Executor) Run() error {
 	return nil
 }
 
+// Done returns a channel that is closed when the executor completes graceful shutdown
+// For infinite tests (testDuration == 0), this channel will never be closed
+func (e *Executor) Done() <-chan struct{} {
+	return e.done
+}
+
 // orchestrateTestPhases manages the test lifecycle: ramp-up, steady-state, and shutdown
 func (e *Executor) orchestrateTestPhases() {
 	start := time.Now()
@@ -255,7 +263,7 @@ func (e *Executor) orchestrateTestPhases() {
 		time.Sleep(remainingDuration)
 		slog.Info("steady-state phase complete")
 	} else if e.testDuration == 0 {
-		// Infinite test, just return
+		// Infinite test, just return (done channel will never be closed)
 		slog.Info("test running indefinitely", "note", "use SIGINT/SIGTERM to stop")
 		return
 	}
@@ -296,4 +304,7 @@ func (e *Executor) initiateGracefulShutdown() {
 	// Log final statistics
 	// Note: Total queries count is available via Prometheus metrics at /metrics endpoint
 	slog.Info("graceful shutdown complete", "note", "check Prometheus metrics for total queries executed")
+
+	// Signal completion by closing the done channel
+	close(e.done)
 }

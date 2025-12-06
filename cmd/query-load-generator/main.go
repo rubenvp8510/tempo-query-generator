@@ -210,8 +210,13 @@ func main() {
 		cancel()
 		// Wait a bit for final metrics
 		time.Sleep(2 * time.Second)
+	case <-executor.Done():
+		slog.Info("test completed normally", "note", "executor finished gracefully")
+		cancel()
+		// Wait a bit for final metrics
+		time.Sleep(2 * time.Second)
 	case <-ctx.Done():
-		// Test completed normally
+		// Context cancelled (shouldn't happen in normal flow)
 	}
 
 	// Stop achieved QPS reporter
