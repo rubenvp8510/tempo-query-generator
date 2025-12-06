@@ -15,16 +15,19 @@ type TempoConfig struct {
 
 // QueryConfig represents query execution configuration
 type QueryConfig struct {
-	Delay                 string  `yaml:"delay" mapstructure:"delay" validate:"required"`
-	TotalConcurrency      int     `yaml:"totalConcurrency" mapstructure:"totalConcurrency" validate:"required,gte=1"`
-	TargetQPS             float64 `yaml:"targetQPS" mapstructure:"targetQPS" validate:"required,gt=0"`
-	BurstMultiplier       float64 `yaml:"burstMultiplier" mapstructure:"burstMultiplier" validate:"omitempty,gt=0"`                    // Multiplier for rate limiter burst size (default: 2.0)
-	QPSMultiplier         float64 `yaml:"qpsMultiplier" mapstructure:"qpsMultiplier" validate:"omitempty,gt=0"`                        // Multiplier to apply to targetQPS for compensation (default: 1.0)
-	Limit                 int     `yaml:"limit" mapstructure:"limit" validate:"omitempty,gt=0"`                                        // Maximum number of results to return per query (default: 1000)
-	TraceFetchProbability float64 `yaml:"traceFetchProbability" mapstructure:"traceFetchProbability" validate:"omitempty,gte=0,lte=1"` // Probability of fetching full trace after search (default: 0.5)
-	Seed                  int64   `yaml:"seed" mapstructure:"seed" validate:"omitempty"`                                               // Seed for deterministic random number generation (default: 0)
-	BypassCache           bool    `yaml:"bypassCache" mapstructure:"bypassCache"`                                                      // Force cache bypass (default: false)
-	TimeWindowJitter      string  `yaml:"timeWindowJitter" mapstructure:"timeWindowJitter"`                                            // Random shift for time windows (e.g. "5m", default: "0s")
+	Delay                   string  `yaml:"delay" mapstructure:"delay" validate:"required"`
+	TotalConcurrency        int     `yaml:"totalConcurrency" mapstructure:"totalConcurrency" validate:"required,gte=1"`
+	TargetQPS               float64 `yaml:"targetQPS" mapstructure:"targetQPS" validate:"required,gt=0"`
+	BurstMultiplier         float64 `yaml:"burstMultiplier" mapstructure:"burstMultiplier" validate:"omitempty,gt=0"`                    // Multiplier for rate limiter burst size (default: 2.0)
+	QPSMultiplier           float64 `yaml:"qpsMultiplier" mapstructure:"qpsMultiplier" validate:"omitempty,gt=0"`                        // Multiplier to apply to targetQPS for compensation (default: 1.0)
+	Limit                   int     `yaml:"limit" mapstructure:"limit" validate:"omitempty,gt=0"`                                        // Maximum number of results to return per query (default: 1000)
+	TraceFetchProbability   float64 `yaml:"traceFetchProbability" mapstructure:"traceFetchProbability" validate:"omitempty,gte=0,lte=1"` // Probability of fetching full trace after search (default: 0.5)
+	Seed                    int64   `yaml:"seed" mapstructure:"seed" validate:"omitempty"`                                               // Seed for deterministic random number generation (default: 0)
+	BypassCache             bool    `yaml:"bypassCache" mapstructure:"bypassCache"`                                                      // Force cache bypass (default: false)
+	TimeWindowJitter        string  `yaml:"timeWindowJitter" mapstructure:"timeWindowJitter"`                                            // Random shift for time windows (e.g. "5m", default: "0s")
+	RampUpDuration          string  `yaml:"rampUpDuration" mapstructure:"rampUpDuration"`                                                // Linear ramp from 0 to targetQPS (e.g. "2m", default: "0s" = disabled)
+	TestDuration            string  `yaml:"testDuration" mapstructure:"testDuration"`                                                    // Total test duration including ramp-up (e.g. "15m", default: "0s" = infinite)
+	GracefulShutdownTimeout string  `yaml:"gracefulShutdownTimeout" mapstructure:"gracefulShutdownTimeout"`                              // Max wait for in-flight queries during shutdown (e.g. "30s", default: "30s")
 }
 
 // TimeBucketConfig represents a time bucket configuration from YAML

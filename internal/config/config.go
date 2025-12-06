@@ -29,6 +29,15 @@ func SetDefaults(cfg *Config) {
 	if cfg.Query.Limit <= 0 {
 		cfg.Query.Limit = 1000
 	}
+	if cfg.Query.RampUpDuration == "" {
+		cfg.Query.RampUpDuration = "0s" // Disabled by default
+	}
+	if cfg.Query.TestDuration == "" {
+		cfg.Query.TestDuration = "0s" // Infinite by default
+	}
+	if cfg.Query.GracefulShutdownTimeout == "" {
+		cfg.Query.GracefulShutdownTimeout = "30s"
+	}
 	// Set default weights for time buckets if not specified
 	for i := range cfg.TimeBuckets {
 		if cfg.TimeBuckets[i].Weight <= 0 {
@@ -94,6 +103,27 @@ func validateConfig(cfg *Config) error {
 	if cfg.Query.TimeWindowJitter != "" {
 		if _, err := time.ParseDuration(cfg.Query.TimeWindowJitter); err != nil {
 			return fmt.Errorf("invalid time window jitter duration: %w", err)
+		}
+	}
+
+	// Validate ramp-up duration
+	if cfg.Query.RampUpDuration != "" {
+		if _, err := time.ParseDuration(cfg.Query.RampUpDuration); err != nil {
+			return fmt.Errorf("invalid ramp-up duration: %w", err)
+		}
+	}
+
+	// Validate test duration
+	if cfg.Query.TestDuration != "" {
+		if _, err := time.ParseDuration(cfg.Query.TestDuration); err != nil {
+			return fmt.Errorf("invalid test duration: %w", err)
+		}
+	}
+
+	// Validate graceful shutdown timeout
+	if cfg.Query.GracefulShutdownTimeout != "" {
+		if _, err := time.ParseDuration(cfg.Query.GracefulShutdownTimeout); err != nil {
+			return fmt.Errorf("invalid graceful shutdown timeout: %w", err)
 		}
 	}
 

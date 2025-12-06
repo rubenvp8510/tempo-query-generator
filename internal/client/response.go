@@ -23,4 +23,3 @@ type SpanSet struct {
 type Span struct {
 	SpanID string `json:"spanID"`
 }
-

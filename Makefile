@@ -8,6 +8,9 @@ all: image-build image-push
 build:
 	go build -o $(BINARY) ./cmd/query-load-generator
 
+fmt:
+	gofmt -w ./cmd ./internal
+
 image-build:
 	docker build -f Dockerfile -t ${IMG}:${VERSION} .
 

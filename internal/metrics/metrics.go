@@ -36,6 +36,21 @@ type Metrics struct {
 
 	// Active workers gauge
 	ActiveWorkersGauge prometheus.Gauge
+
+	// Current target QPS (changes during ramp-up)
+	TargetQPSGauge prometheus.Gauge
+
+	// Rolling achieved QPS (last 10s window)
+	AchievedQPSGauge prometheus.Gauge
+
+	// Total queries executed
+	TotalQueriesCounter prometheus.Counter
+
+	// Current phase (0=ramp-up, 1=steady-state, 2=shutdown)
+	TestPhaseGauge prometheus.Gauge
+
+	// Test metadata info metric with labels
+	TestMetadataGauge *prometheus.GaugeVec
 }
 
 // NewMetrics initializes all Prometheus metrics once at startup
@@ -115,6 +130,46 @@ func NewMetrics(namespace string) *Metrics {
 		Help:      "Number of workers currently executing a query",
 	})
 
+	// Target QPS gauge
+	targetQPSGauge := promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "query_load_test",
+		Subsystem: "test",
+		Name:      "target_qps",
+		Help:      "Current target QPS (changes during ramp-up)",
+	})
+
+	// Achieved QPS gauge
+	achievedQPSGauge := promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "query_load_test",
+		Subsystem: "test",
+		Name:      "achieved_qps",
+		Help:      "Rolling achieved QPS (last 10s window)",
+	})
+
+	// Total queries counter
+	totalQueriesCounter := promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: "query_load_test",
+		Subsystem: "test",
+		Name:      "queries_total",
+		Help:      "Total queries executed",
+	})
+
+	// Test phase gauge
+	testPhaseGauge := promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: "query_load_test",
+		Subsystem: "test",
+		Name:      "phase",
+		Help:      "Current test phase (0=ramp-up, 1=steady-state, 2=shutdown)",
+	})
+
+	// Test metadata gauge
+	testMetadataGauge := promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "query_load_test",
+		Subsystem: "test",
+		Name:      "metadata",
+		Help:      "Test metadata (start_time, target_qps, concurrency)",
+	}, []string{"start_time", "target_qps", "concurrency"})
+
 	slog.Info("metrics initialized", "namespace", namespace, "sanitized_namespace", sanitizedNs)
 
 	return &Metrics{
@@ -127,5 +182,10 @@ func NewMetrics(namespace string) *Metrics {
 		TraceFetchFailuresCounter: traceFetchFailuresCounter,
 		ResponseSizeBytesHist:     responseSizeBytesHist,
 		ActiveWorkersGauge:        activeWorkersGauge,
+		TargetQPSGauge:            targetQPSGauge,
+		AchievedQPSGauge:          achievedQPSGauge,
+		TotalQueriesCounter:       totalQueriesCounter,
+		TestPhaseGauge:            testPhaseGauge,
+		TestMetadataGauge:         testMetadataGauge,
 	}
 }

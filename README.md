@@ -19,6 +19,7 @@ The query load generator uses a sophisticated approach to create realistic and c
 - **Rate Limiter**: Uses `golang.org/x/time/rate` to enforce precise rate limiting. Each worker has its own independent rate limiter to ensure fair distribution and predictable behavior.
 - **Burst Multiplier**: Allows temporary bursts above the target rate to compensate for network latency and query execution time. The burst size is calculated as `perWorkerQPS * burstMultiplier`.
 - **QPS Multiplier**: Optional multiplier applied to the target QPS for compensation scenarios (default: 1.0).
+- **Adaptive Backoff**: On Tempo overload signals (429 or 5xx), workers pause using `Retry-After` when present or a capped exponential backoff (200ms→30s) with jitter, and reset the backoff after a successful response to restore throughput.
 
 ### Time Bucket Distribution
 
@@ -59,6 +60,15 @@ The tool simulates realistic user behavior by implementing a search-and-fetch pa
 - **Trace Fetch Probability**: Configurable probability (0.0-1.0) determines how often full traces are fetched after searches. A value of 0.5 means 50% of successful searches will trigger a trace fetch.
 - **Realistic Load**: This two-phase approach exercises both Tempo's search index and trace retrieval mechanisms, providing a more representative performance test.
 
+### Test Lifecycle and Ramp-Up
+
+The tool supports controlled test execution with ramp-up, finite duration, and graceful shutdown:
+
+- **Ramp-Up**: Configurable via `rampUpDuration` (e.g., "2m"). The tool linearly increases QPS from 0 to `targetQPS` over the specified duration. This allows Tempo's caches to warm up gradually and provides more realistic performance measurements. Set to "0s" to disable ramp-up and start at full QPS immediately.
+- **Test Duration**: Configurable via `testDuration` (e.g., "15m"). The total test duration includes both ramp-up and steady-state phases. Set to "0s" for infinite test duration (use SIGINT/SIGTERM to stop).
+- **Graceful Shutdown**: When the test duration expires or a signal is received, the tool initiates graceful shutdown. Workers complete their in-flight queries before exiting, up to the `gracefulShutdownTimeout` duration (default: "30s"). This ensures accurate metrics collection and prevents query loss.
+- **Test Phases**: The tool tracks three phases: ramp-up (phase 0), steady-state (phase 1), and shutdown (phase 2). These are exposed via Prometheus metrics for monitoring.
+
 ### Metrics Collection
 
 The tool exposes Prometheus metrics on port 2112 (`/metrics` endpoint) for monitoring:
@@ -70,6 +80,12 @@ The tool exposes Prometheus metrics on port 2112 (`/metrics` endpoint) for monit
 - Trace fetch failure counters
 - Response size histograms
 - Active workers gauge
+- **Test lifecycle metrics**:
+  - `query_load_test_test_target_qps` - Current target QPS (changes during ramp-up)
+  - `query_load_test_test_achieved_qps` - Rolling achieved QPS (10s window)
+  - `query_load_test_test_queries_total` - Total queries executed
+  - `query_load_test_test_phase` - Current test phase (0=ramp-up, 1=steady-state, 2=shutdown)
+  - `query_load_test_test_metadata` - Test metadata (start_time, target_qps, concurrency)
 
 ## How to Use the Tool
 
@@ -97,6 +113,9 @@ query:
   seed: 42                       # Seed for deterministic random number generation (default: 0)
   bypassCache: false             # Force cache bypass by sending Cache-Control headers (default: false)
   timeWindowJitter: "5m"         # Random shift for time windows to defeat caching (e.g. "5m", "0s" to disable, default: "0s")
+  rampUpDuration: "2m"           # Linear ramp from 0 to targetQPS (e.g. "2m", "0s" to disable, default: "0s")
+  testDuration: "15m"            # Total test duration including ramp-up (e.g. "15m", "0s" for infinite, default: "0s")
+  gracefulShutdownTimeout: "30s" # Max wait for in-flight queries during shutdown (e.g. "30s", default: "30s")
 
 timeBuckets:
   - name: "recent"
@@ -257,6 +276,11 @@ Key metrics:
 - `query_load_test_trace_fetch_failures_total{query_name,status_code}` - Trace fetch failure counter
 - `query_load_test_response_size_bytes{type,query_name}` - Response size histogram
 - `query_load_test_workers_active` - Active workers gauge
+- `query_load_test_test_target_qps` - Current target QPS (changes during ramp-up)
+- `query_load_test_test_achieved_qps` - Rolling achieved QPS (10s window)
+- `query_load_test_test_queries_total` - Total queries executed
+- `query_load_test_test_phase` - Current test phase (0=ramp-up, 1=steady-state, 2=shutdown)
+- `query_load_test_test_metadata{start_time,target_qps,concurrency}` - Test metadata
 
 ## Code Organization
 

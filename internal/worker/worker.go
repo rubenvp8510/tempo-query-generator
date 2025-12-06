@@ -6,20 +6,30 @@ import (
 	"math/rand"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
-
-	"golang.org/x/time/rate"
 
 	"github.com/rubenvp8510/tempo-query-generator/internal/client"
 	"github.com/rubenvp8510/tempo-query-generator/internal/config"
 	"github.com/rubenvp8510/tempo-query-generator/internal/metrics"
 )
 
+const (
+	minAdaptiveBackoff = 200 * time.Millisecond
+	maxAdaptiveBackoff = 30 * time.Second
+	backoffJitterCap   = 300 * time.Millisecond
+)
+
+// RateLimiter interface allows both rate.Limiter and dynamic limiters
+type RateLimiter interface {
+	Wait(ctx context.Context) error
+}
+
 // Worker handles individual query execution in a concurrent worker
 type Worker struct {
 	workerID              int
 	tempoClient           *client.TempoClient
-	limiter               *rate.Limiter
+	limiter               RateLimiter
 	queries               map[string]config.QueryDefinition
 	executionPlan         []config.PlanEntry
 	timeBuckets           []config.TimeBucket
@@ -27,10 +37,10 @@ type Worker struct {
 	metrics               *metrics.Metrics
 	limit                 int
 	testStartTime         time.Time
-	ctx                   context.Context
 	rng                   *rand.Rand    // Deterministic random number generator
 	traceFetchProbability float64       // Probability of fetching full trace after search
 	jitter                time.Duration // Maximum jitter to apply to time windows
+	backoffDuration       time.Duration // Current adaptive backoff delay
 }
 
 // bucketResolution holds the resolved bucket information
@@ -42,16 +52,35 @@ type bucketResolution struct {
 }
 
 // Run executes the worker's main loop, selecting from execution plan using weighted random selection
-func (w *Worker) Run(initialDelay time.Duration) {
+func (w *Worker) Run(ctx context.Context, initialDelay time.Duration) {
 	// Initial delay to spread workers (use deterministic delay based on RNG)
 	if initialDelay > 0 {
 		delay := time.Duration(w.rng.Int63n(int64(initialDelay)))
-		time.Sleep(delay)
+		select {
+		case <-ctx.Done():
+			slog.Info("worker cancelled during initial delay", "worker_id", w.workerID)
+			return
+		case <-time.After(delay):
+			// Continue
+		}
 	}
 
 	for {
+		// Check if context is cancelled before starting new query
+		select {
+		case <-ctx.Done():
+			slog.Info("worker shutting down", "worker_id", w.workerID)
+			return
+		default:
+			// Continue with query execution
+		}
+
 		// Wait for rate limiter permission (blocks until allowed)
-		if err := w.limiter.Wait(w.ctx); err != nil {
+		if err := w.limiter.Wait(ctx); err != nil {
+			if err == context.Canceled {
+				slog.Info("worker stopped during rate limit wait", "worker_id", w.workerID)
+				return
+			}
 			slog.Error("rate limiter error", "worker_id", w.workerID, "error", err)
 			return
 		}
@@ -74,14 +103,24 @@ func (w *Worker) Run(initialDelay time.Duration) {
 		}
 
 		// Execute search query
-		searchResp, res, queryDuration, spansCount := w.executeSearch(queryDef, bucketRes, entry.QueryName)
+		searchResp, res, queryDuration, spansCount := w.executeSearch(ctx, queryDef, bucketRes, entry.QueryName)
+		if res != nil && (res.StatusCode == http.StatusTooManyRequests || res.StatusCode >= 500) {
+			w.applyAdaptiveBackoff(ctx, res, entry.QueryName, bucketRes.bucketName)
+		} else if res != nil && res.StatusCode < 300 {
+			// Successful response clears any accumulated backoff
+			w.resetBackoff()
+		}
+
 		if searchResp == nil {
 			w.metrics.ActiveWorkersGauge.Dec()
 			continue
 		}
 
 		// Fetch full trace details probabilistically
-		w.getTrace(searchResp, entry.QueryName)
+		w.getTrace(ctx, searchResp, entry.QueryName)
+
+		// Increment total queries counter
+		w.metrics.TotalQueriesCounter.Inc()
 
 		// Log query completion
 		w.logQueryCompletion(entry.QueryName, bucketRes, queryDuration, res.StatusCode, spansCount)
@@ -237,10 +276,10 @@ func (w *Worker) resolveBucket(bucketName string) *bucketResolution {
 }
 
 // executeSearch performs the Tempo search and records metrics
-func (w *Worker) executeSearch(queryDef *config.QueryDefinition, bucketRes *bucketResolution, queryName string) (*client.TempoSearchResponse, *http.Response, float64, int) {
+func (w *Worker) executeSearch(ctx context.Context, queryDef *config.QueryDefinition, bucketRes *bucketResolution, queryName string) (*client.TempoSearchResponse, *http.Response, float64, int) {
 	// Perform Tempo search using client
 	start := time.Now()
-	searchResp, res, bodySize, err := w.tempoClient.Search(w.ctx, queryDef.TraceQL, bucketRes.startTime, bucketRes.endTime, w.limit)
+	searchResp, res, bodySize, err := w.tempoClient.Search(ctx, queryDef.TraceQL, bucketRes.startTime, bucketRes.endTime, w.limit)
 
 	queryDuration := time.Since(start).Seconds()
 
@@ -274,7 +313,7 @@ func (w *Worker) executeSearch(queryDef *config.QueryDefinition, bucketRes *buck
 }
 
 // getTrace probabilistically fetches the full trace details after a search
-func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName string) {
+func (w *Worker) getTrace(ctx context.Context, searchResp *client.TempoSearchResponse, queryName string) {
 	if w.traceFetchProbability <= 0 || searchResp == nil || len(searchResp.Traces) == 0 {
 		return
 	}
@@ -292,7 +331,7 @@ func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName stri
 
 	// Fetch the full trace
 	fetchStart := time.Now()
-	fetchRes, bodySize, err := w.tempoClient.GetTrace(w.ctx, traceID)
+	fetchRes, bodySize, err := w.tempoClient.GetTrace(ctx, traceID)
 	fetchDuration := time.Since(fetchStart).Seconds()
 	w.metrics.TraceFetchLatencyHist.WithLabelValues(queryName).Observe(fetchDuration)
 
@@ -305,6 +344,9 @@ func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName stri
 	if fetchRes.StatusCode >= 300 {
 		w.metrics.TraceFetchFailuresCounter.WithLabelValues(queryName, strconv.Itoa(fetchRes.StatusCode)).Inc()
 		slog.Error("trace fetch failed", "worker_id", w.workerID, "query", queryName, "trace_id", traceID, "status_code", fetchRes.StatusCode)
+		if fetchRes.StatusCode == http.StatusTooManyRequests || fetchRes.StatusCode >= 500 {
+			w.applyAdaptiveBackoff(ctx, fetchRes, queryName, "trace_fetch")
+		}
 		return
 	}
 
@@ -312,6 +354,89 @@ func (w *Worker) getTrace(searchResp *client.TempoSearchResponse, queryName stri
 	w.metrics.ResponseSizeBytesHist.WithLabelValues("trace", queryName).Observe(float64(bodySize))
 
 	slog.Debug("trace fetched", "worker_id", w.workerID, "query", queryName, "trace_id", traceID, "duration_seconds", fetchDuration)
+}
+
+// applyAdaptiveBackoff backs off the worker when Tempo signals throttling or overload
+func (w *Worker) applyAdaptiveBackoff(ctx context.Context, res *http.Response, queryName, bucketName string) {
+	backoff := w.nextBackoffDuration(res)
+	if backoff <= 0 {
+		return
+	}
+
+	slog.Warn("adaptive backoff triggered",
+		"worker_id", w.workerID,
+		"query", queryName,
+		"bucket", bucketName,
+		"status_code", res.StatusCode,
+		"backoff", backoff.String())
+
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		slog.Info("backoff cancelled", "worker_id", w.workerID, "query", queryName)
+		return
+	case <-timer.C:
+	}
+}
+
+// nextBackoffDuration calculates the next delay using Retry-After when available or capped exponential backoff
+func (w *Worker) nextBackoffDuration(res *http.Response) time.Duration {
+	if res == nil {
+		return 0
+	}
+
+	if retryAfter := parseRetryAfter(res); retryAfter > 0 {
+		w.backoffDuration = retryAfter
+		return retryAfter + w.jitterDuration(backoffJitterCap)
+	}
+
+	if w.backoffDuration == 0 {
+		w.backoffDuration = minAdaptiveBackoff
+	} else {
+		w.backoffDuration *= 2
+		if w.backoffDuration > maxAdaptiveBackoff {
+			w.backoffDuration = maxAdaptiveBackoff
+		}
+	}
+
+	return w.backoffDuration + w.jitterDuration(backoffJitterCap)
+}
+
+// resetBackoff clears any accumulated adaptive backoff
+func (w *Worker) resetBackoff() {
+	w.backoffDuration = 0
+}
+
+// parseRetryAfter returns the delay specified by the Retry-After header
+func parseRetryAfter(res *http.Response) time.Duration {
+	value := strings.TrimSpace(res.Header.Get("Retry-After"))
+	if value == "" {
+		return 0
+	}
+
+	if seconds, err := strconv.Atoi(value); err == nil {
+		return time.Duration(seconds) * time.Second
+	}
+
+	if t, err := http.ParseTime(value); err == nil {
+		delay := time.Until(t)
+		if delay < 0 {
+			return 0
+		}
+		return delay
+	}
+
+	return 0
+}
+
+// jitterDuration returns a random duration up to max to avoid synchronized retries
+func (w *Worker) jitterDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(w.rng.Int63n(int64(max)))
 }
 
 // logQueryCompletion logs the query completion with appropriate details

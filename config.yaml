@@ -15,6 +15,9 @@ query:
   seed: 42                     # Seed for deterministic random number generation (each worker uses seed + workerID)
   bypassCache: false           # Force cache bypass by sending Cache-Control headers (default: false)
   timeWindowJitter: "5m"       # Random shift for time windows to defeat caching (e.g. "5m", "0s" to disable, default: "0s")
+  rampUpDuration: "2m"          # Linear ramp from 0 to targetQPS (e.g. "2m", "0s" to disable, default: "0s")
+  testDuration: "15m"          # Total test duration including ramp-up (e.g. "15m", "0s" for infinite, default: "0s")
+  gracefulShutdownTimeout: "30s" # Max wait for in-flight queries during shutdown (e.g. "30s", default: "30s")
 
 timeBuckets:
   - name: "recent"

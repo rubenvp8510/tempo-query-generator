@@ -1,11 +1,8 @@
 package worker
 
 import (
-	"context"
 	"math/rand"
 	"time"
-
-	"golang.org/x/time/rate"
 
 	"github.com/rubenvp8510/tempo-query-generator/internal/client"
 	"github.com/rubenvp8510/tempo-query-generator/internal/config"
@@ -16,7 +13,7 @@ import (
 type WorkerBuilder struct {
 	workerID              int
 	tempoClient           *client.TempoClient
-	limiter               *rate.Limiter
+	limiter               RateLimiter
 	queries               map[string]config.QueryDefinition
 	executionPlan         []config.PlanEntry
 	timeBuckets           []config.TimeBucket
@@ -46,7 +43,7 @@ func (b *WorkerBuilder) WithTempoClient(tempoClient *client.TempoClient) *Worker
 }
 
 // WithLimiter sets the rate limiter
-func (b *WorkerBuilder) WithLimiter(limiter *rate.Limiter) *WorkerBuilder {
+func (b *WorkerBuilder) WithLimiter(limiter RateLimiter) *WorkerBuilder {
 	b.limiter = limiter
 	return b
 }
@@ -132,7 +129,6 @@ func (b *WorkerBuilder) Build() *Worker {
 		metrics:               b.metrics,
 		limit:                 b.limit,
 		testStartTime:         b.testStartTime,
-		ctx:                   context.Background(),
 		rng:                   rng,
 		traceFetchProbability: b.traceFetchProbability,
 		jitter:                b.jitter,
